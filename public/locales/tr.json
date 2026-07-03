@@ -1,0 +1,654 @@
+{
+  "login": {
+    "title": "Tekrar Hoş Geldiniz!",
+    "email": "İş E‑postası Girin",
+    "password": "Şifre",
+    "button": "Giriş Yap",
+    "loading": "Yükleniyor",
+    "register_prompt": "Hesabınız yok mu?",
+    "register_link": "Kaydol",
+    "welcome_notification": "Maxun’a Hoş Geldiniz!",
+    "validation": {
+      "required_fields": "E‑posta ve şifre zorunludur",
+      "password_length": "Şifre en az 6 karakter olmalıdır"
+    },
+    "error": {
+      "user_not_found": "Kullanıcı mevcut değil",
+      "invalid_credentials": "Geçersiz e‑posta veya şifre",
+      "server_error": "Giriş başarısız. Lütfen daha sonra tekrar deneyin",
+      "generic": "Bir hata oluştu. Lütfen tekrar deneyin"
+    }
+  },
+  "register": {
+    "title": "Hesap Oluştur",
+    "email": "İş E‑postası Girin",
+    "password": "Şifre",
+    "button": "Kaydol",
+    "loading": "Yükleniyor",
+    "register_prompt": "Zaten hesabınız var mı?",
+    "login_link": "Giriş Yap",
+    "welcome_notification": "Maxun’a Hoş Geldiniz!",
+    "validation": {
+      "email_required": "E‑posta zorunludur",
+      "password_requirements": "Şifre en az 6 karakter olmalıdır"
+    },
+    "error": {
+      "user_exists": "Bu e‑posta ile kullanıcı zaten mevcut",
+      "creation_failed": "Hesap oluşturulamadı",
+      "server_error": "Sunucu hatası oluştu",
+      "generic": "Kayıt başarısız. Lütfen tekrar deneyin"
+    }
+  },
+  "recordingtable": {
+    "run": "Çalıştır",
+    "name": "Ad",
+    "schedule": "Zamanlama",
+    "integrate": "Entegre Et",
+    "settings": "Ayarlar",
+    "options": "Seçenekler",
+    "heading": "Robotlarım",
+    "new": "Robot Oluştur",
+    "search_criteria": "Arama kriterlerinizi değiştirmeyi deneyin",
+    "placeholder": {
+      "title": "Başlamaya Hazırsınız",
+      "body": "Oluşturduğunuz robotlar burada görünecektir. Başlamak için \"Robot Oluştur\"a tıklayın!",
+      "search": "Aramanızla eşleşen robot yok"
+    },
+    "modal": {
+      "title": "URL’yi Girin",
+      "login_title": "Bu web sitesine giriş gerekiyor mu?",
+      "label": "URL",
+      "button": "Kaydı Başlat"
+    },
+    "warning_modal": {
+      "title": "Aktif Tarayıcı Tespit Edildi",
+      "message": "Hâlihazırda çalışan bir tarayıcı kayıt oturumu var. İptal edip yeni bir kayıt başlatmak ister misiniz?",
+      "discard_and_create": "İptal Et ve Yenisi Oluştur",
+      "cancel": "İptal"
+    },
+    "retrain": "Yeniden Eğit",
+    "edit": "Düzenle",
+    "delete": "Sil",
+    "duplicate": "Çoğalt",
+    "search": "Robot Ara...",
+    "notifications": {
+      "delete_warning": "Robota bağlı çalıştırmalar var. Robotu silmeden önce çalıştırmaları silin",
+      "delete_success": "Robot başarıyla silindi",
+      "auth_success": "Robot başarıyla kimlik doğrulandı",
+      "browser_limit_warning": "Uzak tarayıcılar şu anda meşgul. Lütfen birkaç dakika bekleyip tekrar deneyin"
+    }
+  },
+  "mainmenu": {
+    "recordings": "Robotlar",
+    "runs": "Çalıştırmalar",
+    "proxy": "Proxy",
+    "apikey": "API Anahtarı",
+    "feedback": "Maxun Cloud’a Katıl",
+    "apidocs": "Web Siteyi API’ye Dönüştür"
+  },
+  "runstable": {
+    "runs": "Tüm Çalıştırmalar",
+    "runStatus": "Durum",
+    "runName": "Ad",
+    "name": "Ad",
+    "startedAt": "Başlama",
+    "finishedAt": "Bitiş",
+    "delete": "Sil",
+    "settings": "Ayarlar",
+    "search": "Çalıştırma Ara...",
+    "sort_tooltip": "Sıralamak için tıkla",
+    "placeholder": {
+      "title": "Çalıştırma Bulunamadı",
+      "body": "Tüm robot çalıştırmalarınız burada görünecektir. Bir robot aktif olduğunda, çalıştırmaları buraya kaydedilecektir.",
+      "search": "Aramanızla eşleşen çalıştırma yok"
+    },
+    "notifications": {
+      "no_runs": "Çalıştırma bulunamadı. Lütfen tekrar deneyin.",
+      "delete_success": "Çalıştırma başarıyla silindi"
+    }
+  },
+  "proxy": {
+    "title": "Proxy Yapılandırması",
+    "tab_standard": "Standart Proxy",
+    "tab_rotation": "Otomatik Proxy Döndürme",
+    "server_url": "Proxy Sunucu URL’si",
+    "server_url_helper": "Tüm robotlar için kullanılacak proxy. HTTP ve SOCKS desteklenir. Örnek http://myproxy.com:3128 veya socks5://myproxy.com:3128. Kısa biçim myproxy.com:3128 HTTP proxy kabul edilir.",
+    "requires_auth": "Kimlik Doğrulama Gerekli mi?",
+    "username": "Kullanıcı Adı",
+    "password": "Şifre",
+    "add_proxy": "Proxy Ekle",
+    "test_proxy": "Proxy’yi Test Et",
+    "remove_proxy": "Proxy’yi Kaldır",
+    "table": {
+      "proxy_url": "Proxy URL",
+      "requires_auth": "Kimlik Doğrulama Gerekli"
+    },
+    "coming_soon": "Yakında — Açık Kaynak (Temel Döndürme) & Cloud (Gelişmiş Döndürme). Altyapı yönetmek istemiyorsanız, erken erişim için cloud bekleme listemize katılın.",
+    "join_waitlist": "Maxun Cloud Bekleme Listesine Katıl",
+    "alert": {
+      "title": "Proxy’niz kullanıcı adı ve şifre gerektiriyorsa, bunları her zaman URL’den ayrı girin.",
+      "right_way": "Doğru yol",
+      "wrong_way": "Yanlış yol",
+      "proxy_url": "Proxy URL:",
+      "username": "Kullanıcı Adı:",
+      "password": "Şifre:"
+    },
+    "notifications": {
+      "config_success": "Proxy yapılandırması başarıyla gönderildi",
+      "config_error": "Proxy yapılandırması gönderilemedi. Tekrar deneyin.",
+      "test_success": "Proxy yapılandırması çalışıyor",
+      "test_error": "Proxy testi başarısız. Tekrar deneyin.",
+      "fetch_success": "Proxy yapılandırması alındı",
+      "remove_success": "Proxy yapılandırması kaldırıldı",
+      "remove_error": "Proxy kaldırma başarısız. Tekrar deneyin."
+    }
+  },
+  "apikey": {
+    "title": "API Anahtarını Yönet",
+    "default_name": "Maxun API Anahtarı",
+    "table": {
+      "name": "API Anahtar Adı",
+      "key": "API Anahtarı",
+      "actions": "Eylemler"
+    },
+    "actions": {
+      "copy": "Kopyala",
+      "show": "Göster",
+      "hide": "Gizle",
+      "delete": "Sil"
+    },
+    "no_key_message": "Henüz bir API anahtarı oluşturmadınız.",
+    "generate_button": "API Anahtarı Oluştur",
+    "notifications": {
+      "fetch_error": "API Anahtarı alınamadı - {{error}}",
+      "generate_success": "API anahtarı oluşturuldu",
+      "generate_error": "API anahtarı oluşturulamadı - {{error}}",
+      "delete_success": "API anahtarı silindi",
+      "delete_error": "API anahtarı silinemedi - {{error}}",
+      "copy_success": "API anahtarı kopyalandı"
+    }
+  },
+  "action_description": {
+    "text": {
+      "title": "Metin Yakala",
+      "description": "Çıkarmak istediğiniz metinlerin üzerine gelin ve tıklayarak seçin"
+    },
+    "screenshot": {
+      "title": "Ekran Görüntüsü Yakala",
+      "description": "Sayfanın tamamının veya bir bölümünün ekran görüntüsünü alın"
+    },
+    "list": {
+      "title": "Liste Yakala",
+      "description": "Çıkarmak istediğiniz listenin üzerine gelin. Seçtikten sonra, listenin içindeki tüm metinleri seçebilirsiniz."
+    },
+    "default": {
+      "title": "Hangi verileri çıkarmak istiyorsunuz?",
+      "description": "Bir robot bir veya birden fazla işlem gerçekleştirebilir. Aşağıdaki seçeneklerden seçim yapın."
+    },
+    "list_stages": {
+      "initial": "Listeyi ve içindeki metinleri seçin",
+      "pagination": "Robotun listenin geri kalanını nasıl yakalayacağını seçin",
+      "limit": "Çıkarılacak öğe sayısını seçin",
+      "complete": "Yakalama tamamlandı"
+    },
+    "actions": {
+      "text": "Metin Yakala",
+      "list": "Liste Yakala",
+      "screenshot": "Ekran Görüntüsü Yakala"
+    }
+  },
+  "right_panel": {
+    "buttons": {
+      "capture_list": "Liste Yakala",
+      "capture_text": "Metin Yakala",
+      "capture_screenshot": "Ekran Görüntüsü Yakala",
+      "confirm": "Onayla",
+      "discard": "İptal",
+      "confirm_capture": "Yakalamayı Onayla",
+      "confirm_pagination": "Onayla",
+      "confirm_limit": "Onayla",
+      "confirm_reset": "Onayla",
+      "finish_capture": "Yakalamayı Bitir",
+      "back": "Geri",
+      "reset": "Kaydı Yeniden Başlat",
+      "finish": "Bitir",
+      "cancel": "İptal",
+      "delete": "Sil"
+    },
+    "screenshot": {
+      "capture_fullpage": "Tam Sayfa Yakala",
+      "capture_visible": "Görünen Kısmı Yakala",
+      "display_fullpage": "Tam Sayfa Görüntü Al",
+      "display_visible": "Görünen Kısmın Görüntüsünü Al"
+    },
+    "pagination": {
+      "title": "Sayfada sonraki liste öğesini nasıl bulalım?",
+      "click_next": "Sonraki sayfaya gitmek için ‘sonraki’yi tıkla",
+      "click_load_more": "Daha fazla yüklemek için ‘daha fazla yükle’yi tıkla",
+      "scroll_down": "Daha fazla öğe için aşağı kaydır",
+      "scroll_up": "Daha fazla öğe için yukarı kaydır",
+      "none": "Yüklenecek başka öğe yok"
+    },
+    "limit": {
+      "title": "En fazla kaç satır çıkarmak istiyorsunuz?",
+      "custom": "Özel",
+      "enter_number": "Sayı gir"
+    },
+    "fields": {
+      "label": "Etiket",
+      "data": "Veri",
+      "field_label": "Alan Etiketi",
+      "field_data": "Alan Verisi"
+    },
+    "messages": {
+      "list_selected": "Liste başarıyla seçildi",
+      "list_empty": "Liste seçildi. Lütfen listenin içindeki alanları seçin."
+    },
+    "errors": {
+      "select_pagination": "Lütfen bir sayfalama tipi seçin.",
+      "select_pagination_element": "Lütfen önce sayfalama öğesini seçin.",
+      "select_limit": "Lütfen bir limit seçin veya özel limit girin.",
+      "invalid_limit": "Geçerli bir limit girin.",
+      "confirm_text_fields": "Lütfen tüm metin alanlarını onaylayın",
+      "unable_create_settings": "Liste ayarları oluşturulamadı. Bir alan tanımladığınızdan emin olun.",
+      "capture_text_discarded": "Metin Yakalama İptal Edildi",
+      "capture_list_discarded": "Liste Yakalama İptal Edildi",
+      "label_required": "Etiket boş olamaz",
+      "no_text_captured": "Henüz metin yakalanmadı. Lütfen önce metin öğeleri seçin.",
+      "duplicate_label": "Bu etiket zaten mevcut. Lütfen benzersiz bir etiket kullanın.",
+      "capture_list_first": "Lütfen onaylamadan önce bir liste yakalayın ve alanlar seçin.",
+      "confirm_all_list_fields": "Lütfen devam etmeden önce tüm liste alanlarını onaylayın."
+    },
+    "tooltips": {
+      "capture_list_first": "Önce bir listenin üzerine gelin ve içindeki metin alanlarını seçin",
+      "confirm_all_list_fields": "Lütfen bir sonraki adıma geçmeden önce tüm liste alanlarını onaylayın"
+    }
+  },
+  "save_recording": {
+    "title": "Robotu Kaydet",
+    "robot_name": "Robot Adı",
+    "buttons": {
+      "save": "Kaydet",
+      "confirm": "Onayla"
+    },
+    "notifications": {
+      "save_success": "Robot kaydedildi",
+      "retrain_success": "Robot yeniden eğitildi",
+      "save_error": "Robot kaydedilirken hata"
+    },
+    "errors": {
+      "user_not_logged": "Kullanıcı girişi yok. Kaydedilemedi.",
+      "exists_warning": "Bu isimde robot zaten var; üzerine yazmayı onaylayın.",
+      "name_exists": "Bu isimde bir robot zaten mevcut. Lütfen farklı bir isim seçin.",
+      "no_actions_performed": "Robot kaydedilemez. Lütfen kaydetmeden önce en az bir yakalama eylemi gerçekleştirin."
+    },
+    "tooltips": {
+      "saving": "Akış optimize ediliyor ve kaydediliyor"
+    }
+  },
+  "browser_recording": {
+    "modal": {
+      "confirm_discard": "Kaydı iptal etmek istediğinize emin misiniz?",
+      "confirm_reset": "Kaydı yeniden başlatmak istediğinize emin misiniz?",
+      "reset_warning": "Bu işlem, mevcut oturumdaki tüm yakalamaları temizler ve aynı site için kaydı yeniden başlatır."
+    },
+    "notifications": {
+      "terminated": "Kayıt sonlandırıldı",
+      "environment_reset": "Tarayıcı ortamı sıfırlandı",
+      "reset_successful": "Yakalamalar sıfırlandı ve başlangıç durumuna dönüldü",
+      "timeout_discarded": "Kayıt oturumu 10 dakika sonra zaman aşımına uğradı ve otomatik olarak atıldı."
+    }
+  },
+  "interpretation_log": {
+    "titles": {
+      "output_preview": "Çıktı Verisi Önizlemesi",
+      "screenshot": "Ekran Görüntüsü"
+    },
+    "messages": {
+      "additional_rows": "Kaydı bitirdiğinizde ek satırlar çıkarılacak.",
+      "successful_training": "Robotu başarıyla eğittiniz! Çıkaracağı verilerin önizlemesi için aşağıdaki butona tıklayın.",
+      "no_selection": "Henüz seçim yapmadınız. Seçim yaptığınızda önizleme burada görünecek."
+    },
+    "data_sections": {
+      "binary_received": "---------- İkili çıktı verisi alındı ----------",
+      "serializable_received": "---------- Serileştirilebilir çıktı verisi alındı ----------",
+      "mimetype": "mimetype: ",
+      "image_below": "Görüntü aşağıda:",
+      "separator": "--------------------------------------------------"
+    },
+    "notifications": {
+      "reset_success": "Önizleme sıfırlandı"
+    }
+  },
+  "interpretation_buttons": {
+    "buttons": {
+      "preview": "Çıktı Önizle",
+      "reset": "Sıfırla",
+      "yes": "Evet",
+      "no": "Hayır"
+    },
+    "messages": {
+      "extracting": "Veri çıkarılıyor... lütfen bekleyin",
+      "restart_required": "Kaydı güncelledikten sonra yorumlamayı yeniden başlatın",
+      "run_finished": "Çalıştırma tamamlandı",
+      "run_failed": "Çalıştırma başlatılamadı"
+    },
+    "modal": {
+      "use_previous": "Bu işlem için önceki seçiminizi koşul olarak kullanmak ister misiniz?",
+      "previous_action": "Önceki işleminiz:",
+      "element_text": " metnine sahip öğe"
+    },
+    "notifications": {
+      "reset_success": "Önizleme başarıyla sıfırlandı"
+    }
+  },
+  "recording_page": {
+    "loader": {
+      "browser_startup": "Tarayıcı başlatılıyor... Lütfen bekleyin"
+    }
+  },
+  "integration_settings": {
+    "title": "Entegrasyon Ayarları",
+    "descriptions": {
+      "authenticated_as": "Kimlik doğrulandı: {{email}}"
+    },
+    "buttons": {
+      "submit": "Gönder",
+      "remove_integration": "Entegrasyonu Kaldır"
+    },
+    "google": {
+      "title": "Google Sheet ile Entegrasyon",
+      "descriptions": {
+        "sync_info": "Bu seçenek etkinse robot başarılı olduğunda veriler Google Sheet’e eklenir.",
+        "authenticated_as": "Kimlik doğrulandı: {{email}}"
+      },
+      "alerts": {
+        "success": {
+          "title": "Google Sheet entegrasyonu başarılı",
+          "content": "Robot her başarılı çalıştırmada veriyi {{sheetName}} sayfanıza ekler. Kontrol etmek için",
+          "here": "buraya",
+          "note": "Not:",
+          "sync_limitation": "Entegrasyon öncesi veriler senkronize edilmez."
+        }
+      },
+      "buttons": {
+        "authenticate": "Google ile Giriş Yap",
+        "fetch_sheets": "E‑Tabloları Getir",
+        "remove_integration": "Entegrasyonu Kaldır",
+        "submit": "Gönder"
+      },
+      "fields": {
+        "select_sheet": "Google Sheet Seç",
+        "selected_sheet": "Seçilen Sheet: {{name}} (ID: {{id}})"
+      },
+      "errors": {
+        "auth_error": "Google kimlik doğrulama hatası",
+        "fetch_error": "E‑tablo alma hatası: {{message}}",
+        "update_error": "Sheet ID güncelleme hatası: {{message}}",
+        "remove_error": "Google Sheets entegrasyon kaldırma hatası: {{message}}"
+      },
+      "notifications": {
+        "sheet_selected": "Google Sheet seçildi",
+        "integration_removed": "Google Sheets entegrasyonu kaldırıldı"
+      }
+    },
+    "airtable": {
+      "title": "Airtable ile Entegrasyon",
+      "descriptions": {
+        "sync_info": "Bu seçenek etkinse robot başarılı olduğunda veriler Airtable Base’e eklenir.",
+        "authenticated_as": "Airtable kimlik doğrulandı. Base ve tablo seçebilirsiniz."
+      },
+      "alerts": {
+        "success": {
+          "title": "Airtable entegrasyonu başarılı",
+          "content": "Robot her başarılı çalıştırmada veriyi {{baseName}} > {{tableName}}’e ekler. Kontrol etmek için",
+          "here": "buraya",
+          "note": "Not:",
+          "sync_limitation": "Yalnızca entegrasyon sonrası veriler senkronize edilir."
+        }
+      },
+      "buttons": {
+        "authenticate": "Airtable’a Bağlan",
+        "fetch_bases": "Base’leri Getir",
+        "fetch_tables": "Tabloları Getir",
+        "remove_integration": "Entegrasyonu Kaldır",
+        "submit": "Base ve Tablo Seç"
+      },
+      "fields": {
+        "select_base": "Airtable Base Seç",
+        "select_table": "Airtable Tablo Seç",
+        "selected_base": "Seçilen Base: {{name}}",
+        "selected_table": "Seçilen Tablo: {{name}}"
+      },
+      "errors": {
+        "auth_error": "Airtable kimlik doğrulama hatası",
+        "fetch_error": "Base alma hatası: {{message}}",
+        "fetch_tables_error": "Tablo alma hatası: {{message}}",
+        "update_error": "Base güncelleme hatası: {{message}}",
+        "remove_error": "Airtable entegrasyon kaldırma hatası: {{message}}"
+      },
+      "notifications": {
+        "base_selected": "Base seçildi",
+        "table_selected": "Tablo seçildi",
+        "integration_removed": "Airtable entegrasyonu kaldırıldı"
+      }
+    }
+  },
+  "robot_duplication": {
+    "title": "Robotu Çoğalt",
+    "descriptions": {
+      "purpose": "Aynı yapıya sahip sayfalarda veri toplamak için kullanılır.",
+      "example": "Örnek: {{url1}} için robot oluşturduysanız, benzer {{url2}} sayfaları için çoğaltabilirsiniz.",
+      "warning": "⚠️ Yeni sayfanın yapısının aynı olduğundan emin olun."
+    },
+    "fields": {
+      "target_url": "Robot Hedef URL",
+      "new_name": "Robot Adı"
+    },
+    "buttons": {
+      "duplicate": "Robotu Çoğalt",
+      "cancel": "İptal"
+    },
+    "notifications": {
+      "robot_not_found": "Robot bulunamadı. Tekrar deneyin.",
+      "url_required": "Hedef URL gerekli.",
+      "name_required": "Robot adı gereklidir.",
+      "duplicate_success": "Robot çoğaltıldı",
+      "duplicate_error": "Hedef URL güncellenemedi. Tekrar deneyin.",
+      "unknown_error": "Hedef URL güncellenirken hata oluştu"
+    }
+  },
+  "robot_settings": {
+    "title": "Robot Ayarları",
+    "target_url": "Robot Hedef URL",
+      "new_name": "Robot Adı",
+    "robot_id": "Robot ID",
+    "robot_limit": "Robot Limiti",
+    "created_by_user": "Oluşturan",
+    "created_at": "Oluşturulma",
+    "errors": {
+      "robot_not_found": "Robot bulunamadı. Tekrar deneyin."
+    },
+    "buttons": {
+      "close": "Kapat"
+    }
+  },
+  "robot_edit": {
+    "title": "Robotu Düzenle",
+    "change_name": "Robot Adı",
+    "robot_limit": "Robot Limiti",
+    "save": "Değişiklikleri Kaydet",
+    "cancel": "İptal",
+    "notifications": {
+      "update_success": "Robot güncellendi",
+      "update_failed": "Robot güncellenemedi. Tekrar deneyin.",
+      "update_error": "Güncelleme sırasında hata"
+    }
+  },
+  "schedule_settings": {
+    "title": "Zamanlama Ayarları",
+    "run_every": "Çalıştırma aralığı",
+    "start_from": "Başlangıç",
+    "on_day": "Gününde",
+    "at_around": "Saat civarı",
+    "timezone": "Zaman Dilimi",
+    "buttons": {
+      "delete_schedule": "Zamanlamayı Sil",
+      "save_schedule": "Zamanlamayı Kaydet",
+      "cancel": "İptal"
+    },
+    "labels": {
+      "in_between": "Arasında",
+      "run_once_every": "Her",
+      "start_from_label": "Başlangıç",
+      "on_day_of_month": "Ayın Günü",
+      "on_day": {
+        "st": ".",
+        "nd": ".",
+        "rd": ".",
+        "th": "."
+      }
+    }
+  },
+  "main_page": {
+    "notifications": {
+      "interpretation_success": "Robot {{name}} yorumlandı",
+      "interpretation_failed": "Robot {{name}} yorumlanamadı",
+      "run_started": "Robot çalıştırılıyor: {{name}}",
+      "run_start_failed": "Robot çalıştırılamadı: {{name}}",
+      "schedule_success": "Robot {{name}} zamanlandı",
+      "schedule_failed": "Robot {{name}} zamanlanamadı",
+      "abort_success": "Robot {{name}} yorumlaması iptal edildi",
+      "abort_failed": "Robot {{name}} yorumlaması iptal edilemedi",
+      "abort_initiated": "Robot {{name}} yorumu iptal ediliyor"
+    },
+    "menu": {
+      "recordings": "Robotlar",
+      "runs": "Çalıştırmalar",
+      "proxy": "Proxy",
+      "apikey": "API Anahtarı"
+    }
+  },
+  "browser_window": {
+    "attribute_modal": {
+      "title": "Öznitelik Seç",
+      "notifications": {
+        "list_select_success": "Liste seçildi. Çıkarılacak verileri seçin.",
+        "pagination_select_success": "Sayfalama öğesi seçildi"
+      }
+    },
+    "attribute_options": {
+      "anchor": {
+        "text": "Metin: {{text}}",
+        "url": "URL: {{url}}"
+      },
+      "image": {
+        "alt_text": "Alternatif Metin: {{altText}}",
+        "image_url": "Görsel URL: {{imageUrl}}"
+      },
+      "default": {
+        "text": "Metin: {{text}}"
+      }
+    }
+  },
+  "runs_table": {
+    "run_type_chips": {
+      "manual_run": "Manuel",
+      "scheduled_run": "Zamanlanmış",
+      "api": "API",
+      "sdk": "SDK",
+      "mcp": "MCP",
+      "cli": "CLI",
+      "unknown_run_type": "Bilinmeyen"
+    },
+    "run_status_chips": {
+      "success": "Başarılı",
+      "running": "Çalışıyor",
+      "scheduled": "Zamanlandı",
+      "queued": "Kuyrukta",
+      "failed": "Başarısız",
+      "aborted": "İptal"
+    },
+    "run_settings_modal": {
+      "title": "Çalıştırma Ayarları",
+      "labels": {
+        "run_id": "Çalıştırma ID",
+        "run_by_user": "Kullanıcı",
+        "run_by_schedule": "Zamanlama ID",
+        "run_by_api": "API",
+        "run_type": "Tür"
+      }
+    }
+  },
+  "run_content": {
+    "tabs": {
+      "output_data": "Çıktı Verisi",
+      "log": "Kayıt"
+    },
+    "buttons": {
+      "stop": "Durdur"
+    },
+    "loading": "Veriler yükleniyor...",
+    "empty_output": "Çıktı verisi yok",
+    "captured_data": {
+      "title": "Yakalanan Veriler",
+      "download_csv": "CSV İndir",
+      "view_full": "Tam Veriyi Gör",
+      "items": "öğe",
+      "schema_title": "Yakalanan Metinler",
+      "list_title": "Yakalanan Listeler"
+    },
+    "captured_screenshot": {
+      "title": "Yakalanan Görüntüler",
+      "download": "İndir",
+      "render_failed": "Görüntü render edilemedi"
+    }
+  },
+  "navbar": {
+    "project_name": "Maxun",
+    "notifications": {
+      "success": {
+        "logout": "Çıkış yapıldı"
+      },
+      "errors": {
+        "logout": {
+          "unauthorized": "Bu işlemi yapmaya yetkiniz yok",
+          "server": "Çıkış sırasında sunucu hatası",
+          "network": "Çıkış sırasında ağ hatası",
+          "unknown": "Bilinmeyen hata oluştu"
+        }
+      }
+    },
+    "upgrade": {
+      "button": "Yükselt",
+      "modal": {
+        "up_to_date": "🎉 Güncelsiniz!",
+        "new_version_available": "Yeni sürüm mevcut: {{version}}. Güncelleyerek yeni özelliklere erişin!",
+        "view_updates": "Tüm güncellemeleri görüntüle",
+        "view_updates_link": "buradan",
+        "tabs": {
+          "manual_setup": "Manuel Kurulum",
+          "docker_setup": "Docker Kurulumu"
+        }
+      }
+    },
+    "menu_items": {
+      "logout": "Çıkış Yap",
+      "discord": "Discord",
+      "youtube": "YouTube",
+      "twitter": "Twitter (X)",
+      "language": "Dil"
+    },
+    "recording": {
+      "discard": "İptal"
+    }
+  },
+  "language_menu": {
+    "en": "İngilizce",
+    "es": "İspanyolca",
+    "ja": "Japonca",
+    "zh": "Çince",
+    "de": "Almanca",
+    "tr": "Türkçe"
+  }
+}

@@ -1,0 +1,844 @@
+/**
+ * Selector Validator
+ * Validates and enriches selectors with metadata using Playwright page instance
+ */
+
+import { Page } from 'playwright-core';
+import logger from '../logger';
+
+interface SelectorInput {
+  selector: string;
+  attribute?: string;
+}
+
+interface EnrichedSelector {
+  tag: string;
+  isShadow: boolean;
+  selector: string;
+  attribute: string;
+}
+
+interface ValidationResult {
+  valid: boolean;
+  enriched?: EnrichedSelector;
+  error?: string;
+}
+
+export class SelectorValidator {
+  private page: Page | null = null;
+
+  /**
+   * Initialize with an existing Page instance and navigate to URL
+   * @param page Page instance from RemoteBrowser
+   * @param url URL to navigate to
+   */
+  async initialize(page: Page, url: string): Promise<void> {
+    this.page = page;
+    try {
+      await page.goto(url, {
+        waitUntil: "networkidle",
+        timeout: 100000,
+      });
+    } catch (err) {
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 100000,
+      });
+    }
+    logger.info(`Navigated to ${url} using RemoteBrowser page`);
+  }
+
+  /**
+   * Validate and enrich a single selector
+   */
+  async validateSelector(input: SelectorInput): Promise<ValidationResult> {
+    if (!this.page) {
+      return { valid: false, error: 'Browser not initialized' };
+    }
+
+    const { selector, attribute = 'innerText' } = input;
+
+    try {
+      const isXPath = selector.startsWith('//') || selector.startsWith('(//');
+
+      let element;
+      if (isXPath) {
+        element = await this.page.locator(`xpath=${selector}`).first();
+      } else {
+        element = await this.page.locator(selector).first();
+      }
+
+      const count = await element.count();
+      if (count === 0) {
+        return {
+          valid: false,
+          error: `Selector "${selector}" did not match any elements`
+        };
+      }
+
+      const tagName = await element.evaluate((el) => el.tagName);
+
+      const isShadow = await element.evaluate((el) => {
+        let parent = el.parentNode;
+        while (parent) {
+          if (parent instanceof ShadowRoot) {
+            return true;
+          }
+          parent = parent.parentNode;
+        }
+        return false;
+      });
+
+      return {
+        valid: true,
+        enriched: {
+          tag: tagName,
+          isShadow,
+          selector,
+          attribute
+        }
+      };
+    } catch (error: any) {
+      logger.error(`Error validating selector "${selector}":`, error.message);
+      return {
+        valid: false,
+        error: `Invalid selector: ${error.message}`
+      };
+    }
+  }
+
+  /**
+   * Validate and enrich multiple selectors
+   */
+  async validateSchemaFields(
+    fields: Record<string, string | SelectorInput>
+  ): Promise<{ valid: boolean; enriched?: Record<string, EnrichedSelector>; errors?: string[] }> {
+    const enriched: Record<string, EnrichedSelector> = {};
+    const errors: string[] = [];
+
+    for (const [fieldName, fieldInput] of Object.entries(fields)) {
+      const input: SelectorInput = typeof fieldInput === 'string'
+        ? { selector: fieldInput }
+        : fieldInput;
+
+      const result = await this.validateSelector(input);
+
+      if (result.valid && result.enriched) {
+        enriched[fieldName] = result.enriched;
+      } else {
+        errors.push(`Field "${fieldName}": ${result.error}`);
+      }
+    }
+
+    if (errors.length > 0) {
+      return { valid: false, errors };
+    }
+
+    return { valid: true, enriched };
+  }
+
+  /**
+   * Validate list selector and fields
+   */
+  async validateListFields(config: {
+    itemSelector: string;
+    fields: Record<string, string | SelectorInput>;
+  }): Promise<{
+    valid: boolean;
+    enriched?: {
+      listSelector: string;
+      listTag: string;
+      fields: Record<string, EnrichedSelector>;
+    };
+    errors?: string[]
+  }> {
+    const errors: string[] = [];
+
+    const listResult = await this.validateSelector({
+      selector: config.itemSelector,
+      attribute: 'innerText'
+    });
+
+    if (!listResult.valid || !listResult.enriched) {
+      errors.push(`List selector: ${listResult.error}`);
+      return { valid: false, errors };
+    }
+
+    const fieldsResult = await this.validateSchemaFields(config.fields);
+
+    if (!fieldsResult.valid) {
+      errors.push(...(fieldsResult.errors || []));
+      return { valid: false, errors };
+    }
+
+    return {
+      valid: true,
+      enriched: {
+        listSelector: config.itemSelector,
+        listTag: listResult.enriched.tag,
+        fields: fieldsResult.enriched!
+      }
+    };
+  }
+
+  /**
+   * Detect input type for a given selector
+   */
+  async detectInputType(selector: string): Promise<string> {
+    if (!this.page) {
+      throw new Error('Browser not initialized');
+    }
+
+    try {
+      const isXPath = selector.startsWith('//') || selector.startsWith('(//');
+
+      let element;
+      if (isXPath) {
+        element = await this.page.locator(`xpath=${selector}`).first();
+      } else {
+        element = await this.page.locator(selector).first();
+      }
+
+      const count = await element.count();
+      if (count === 0) {
+        throw new Error(`Selector "${selector}" did not match any elements`);
+      }
+
+      const inputType = await element.evaluate((el) => {
+        if (el instanceof HTMLInputElement) {
+          return el.type || 'text';
+        }
+        if (el instanceof HTMLTextAreaElement) {
+          return 'textarea';
+        }
+        if (el instanceof HTMLSelectElement) {
+          return 'select';
+        }
+        return 'text';
+      });
+
+      return inputType;
+    } catch (error: any) {
+      throw new Error(`Failed to detect input type: ${error.message}`);
+    }
+  }
+
+  /**
+   * Auto-detect fields from list selector
+   */
+  async autoDetectListFields(listSelector: string): Promise<{
+    success: boolean;
+    fields?: Record<string, any>;
+    listSelector?: string;
+    error?: string;
+  }> {
+    if (!this.page) {
+      return { success: false, error: 'Browser not initialized' };
+    }
+
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const scriptPath = path.join(__dirname, 'browserSide/pageAnalyzer.js');
+      const scriptContent = fs.readFileSync(scriptPath, 'utf8');
+
+      await this.page.evaluate((script) => {
+        eval(script);
+      }, scriptContent);
+
+      const result = await this.page.evaluate((selector) => {
+        const win = window as any;
+        if (typeof win.autoDetectListFields === 'function') {
+          return win.autoDetectListFields(selector);
+        } else {
+          return {
+            fields: {},
+            error: 'Auto-detection function not loaded'
+          };
+        }
+      }, listSelector);
+
+      // Log debug information
+      if (result.debug) {
+        logger.info(`Debug info: ${JSON.stringify(result.debug)}`);
+      }
+
+      if (result.error || !result.fields || Object.keys(result.fields).length === 0) {
+        return {
+          success: false,
+          error: result.error || 'No fields detected from list selector'
+        };
+      }
+
+      const convertedListSelector = result.listSelector || listSelector;
+
+      logger.info(`Auto-detected ${Object.keys(result.fields).length} fields from list`);
+
+      return {
+        success: true,
+        fields: result.fields,
+        listSelector: convertedListSelector,
+      };
+    } catch (error: any) {
+      logger.error('Field auto-detection error:', error);
+      return {
+        success: false,
+        error: `Field auto-detection failed: ${error.message}`
+      };
+    }
+  }
+
+  /**
+   * Auto-detect pagination type and selector from list selector
+   */
+  async autoDetectPagination(listSelector: string): Promise<{
+    success: boolean;
+    type?: string;
+    selector?: string | null;
+    error?: string;
+  }> {
+    if (!this.page) {
+      return { success: false, error: 'Browser not initialized' };
+    }
+
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const scriptPath = path.join(__dirname, 'browserSide/pageAnalyzer.js');
+      const scriptContent = fs.readFileSync(scriptPath, 'utf8');
+
+      await this.page.evaluate((script) => {
+        eval(script);
+      }, scriptContent);
+
+      const buttonResult = await this.page.evaluate((selector) => {
+        const win = window as any;
+
+        if (typeof win.autoDetectPagination === 'function') {
+          const result = win.autoDetectPagination(selector);
+          return result;
+        } else {
+          console.error('autoDetectPagination function not found!');
+          return {
+            type: '',
+            selector: null,
+            error: 'Pagination auto-detection function not loaded'
+          };
+        }
+      }, listSelector);
+
+      if (buttonResult.debug) {
+        logger.info(`Pagination debug info: ${JSON.stringify(buttonResult.debug)}`);
+      }
+
+      if (buttonResult.error) {
+        logger.error(`Button detection error: ${buttonResult.error}`);
+        return {
+          success: false,
+          error: buttonResult.error
+        };
+      }
+
+      if (buttonResult.type && buttonResult.type !== '') {
+        if (buttonResult.type === 'clickLoadMore' && buttonResult.selector) {
+          const selectorExists = await this.verifySelectorExists(buttonResult.selector);
+
+          if (!selectorExists) {
+            logger.warn('Load More button selector not found on page, trying fallback next-button detection');
+            const fallback = await this.detectNextButtonFallback(listSelector);
+            if (fallback.type) {
+              logger.info(`Fallback detected pagination type: ${fallback.type}${fallback.selector ? ` with selector: ${fallback.selector}` : ''}`);
+              return {
+                success: true,
+                type: fallback.type,
+                selector: fallback.selector
+              };
+            }
+          } else {
+            logger.info('Testing Load More button by clicking...');
+            const loadMoreVerified = await this.testLoadMoreButton(buttonResult.selector, listSelector);
+
+            if (loadMoreVerified) {
+              logger.info(`Verified Load More button works`);
+              return {
+                success: true,
+                type: buttonResult.type,
+                selector: buttonResult.selector
+              };
+            }
+
+            logger.warn('Load More button did not load content, trying fallback next-button detection');
+            const fallback = await this.detectNextButtonFallback(listSelector);
+            if (fallback.type) {
+              logger.info(`Fallback detected pagination type: ${fallback.type}${fallback.selector ? ` with selector: ${fallback.selector}` : ''}`);
+              return {
+                success: true,
+                type: fallback.type,
+                selector: fallback.selector
+              };
+            }
+          }
+
+          logger.warn('Falling back to scroll detection');
+          const scrollTestResult = await this.testInfiniteScrollByScrolling(listSelector);
+
+          if (scrollTestResult.detected) {
+            return {
+              success: true,
+              type: 'scrollDown',
+              selector: null
+            };
+          }
+        } else if (buttonResult.type === 'scrollDown') {
+          const scrollTestResult = await this.testInfiniteScrollByScrolling(listSelector);
+
+          if (scrollTestResult.detected) {
+            return {
+              success: true,
+              type: 'scrollDown',
+              selector: null
+            };
+          }
+
+          logger.warn('Scroll-based pagination not confirmed, trying fallback next-button detection');
+          const fallback = await this.detectNextButtonFallback(listSelector);
+          if (fallback.type) {
+            logger.info(`Fallback detected pagination type: ${fallback.type}${fallback.selector ? ` with selector: ${fallback.selector}` : ''}`);
+            return {
+              success: true,
+              type: fallback.type,
+              selector: fallback.selector
+            };
+          }
+        } else {
+          if (buttonResult.selector) {
+            const selectorExists = await this.verifySelectorExists(buttonResult.selector);
+            if (!selectorExists) {
+              logger.warn(`Detected pagination selector not found on page, discarding: ${buttonResult.selector}`);
+            } else {
+              logger.info(`Detected pagination type: ${buttonResult.type} with selector: ${buttonResult.selector}`);
+              return {
+                success: true,
+                type: buttonResult.type,
+                selector: buttonResult.selector
+              };
+            }
+          } else {
+            logger.info(`Detected pagination type: ${buttonResult.type}`);
+            return {
+              success: true,
+              type: buttonResult.type,
+              selector: null
+            };
+          }
+        }
+      }
+
+      return {
+        success: true,
+        type: '',
+        selector: null
+      };
+
+    } catch (error: any) {
+      logger.error('Pagination auto-detection error:', error);
+      return {
+        success: false,
+        error: `Pagination auto-detection failed: ${error.message}`
+      };
+    }
+  }
+
+  /**
+   * Validate field selectors by checking how many list items return a non-empty value.
+   * Samples up to 10 list items for speed.
+   * Returns a fill-rate map { fieldName -> 0.0–1.0 }.
+   * Fields with fill rate < MIN_FILL_RATE should be discarded before saving the robot.
+   */
+  async validateFieldFillRates(
+    fields: Record<string, any>,
+    listSelector: string
+  ): Promise<Record<string, number>> {
+    if (!this.page) return {};
+
+    try {
+      const fillRates = await this.page.evaluate(
+        ({ fields, listSelector }: { fields: Record<string, any>; listSelector: string }) => {
+          function evalXPath(expr: string, contextNode: Document | Element = document): Element[] {
+            try {
+              const result = document.evaluate(
+                expr, contextNode, null,
+                XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null
+              );
+              return Array.from({ length: result.snapshotLength }, (_, i) =>
+                result.snapshotItem(i) as Element
+              );
+            } catch { return []; }
+          }
+
+          const listItems = evalXPath(listSelector).slice(0, 10);
+          if (listItems.length === 0) return {};
+
+          const rates: Record<string, number> = {};
+          for (const [label, field] of Object.entries(fields) as [string, any][]) {
+            if (!field?.selector) { rates[label] = 0; continue; }
+            const isXPath = field.selector.startsWith('//') || field.selector.startsWith('(//');
+            if (!isXPath) {
+              let filled = 0;
+              for (const item of listItems) {
+                try {
+                  const el = item.querySelector(field.selector);
+                  if (!el) continue;
+                  const val = field.attribute && field.attribute !== 'innerText' && field.attribute !== 'textContent'
+                    ? el.getAttribute(field.attribute) || ''
+                    : (el as HTMLElement).innerText || el.textContent || '';
+                  if (val.trim().length > 0) filled++;
+                } catch { }
+              }
+              rates[label] = filled / listItems.length;
+            } else {
+              const matched = evalXPath(field.selector);
+              let filled = 0;
+              for (const el of matched.slice(0, listItems.length)) {
+                try {
+                  const val = field.attribute && field.attribute !== 'innerText' && field.attribute !== 'textContent'
+                    ? el.getAttribute(field.attribute) || ''
+                    : (el as HTMLElement).innerText || el.textContent || '';
+                  if (val.trim().length > 0) filled++;
+                } catch { }
+              }
+              rates[label] = matched.length === 0 ? 0 : filled / listItems.length;
+            }
+          }
+          return rates;
+        },
+        { fields, listSelector }
+      );
+      return fillRates || {};
+    } catch (error: any) {
+      logger.warn('[SelectorValidator] validateFieldFillRates failed:', error.message);
+      return {};
+    }
+  }
+
+  /**
+   * Test Load More button by clicking it and checking if content loads
+   */
+  private async testLoadMoreButton(buttonSelector: string, listSelector: string): Promise<boolean> {
+    if (!this.page) {
+      return false;
+    }
+
+    try {
+      const initialState = await this.page.evaluate((selector) => {
+        function evaluateSelector(sel: string, doc: Document) {
+          const isXPath = sel.startsWith('//') || sel.startsWith('(//');
+          if (isXPath) {
+            const result = doc.evaluate(sel, doc, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+            const elements = [];
+            for (let i = 0; i < result.snapshotLength; i++) {
+              elements.push(result.snapshotItem(i));
+            }
+            return elements;
+          } else {
+            return Array.from(doc.querySelectorAll(sel));
+          }
+        }
+
+        const listElements = evaluateSelector(selector, document);
+        return {
+          itemCount: listElements.length,
+          scrollHeight: document.documentElement.scrollHeight
+        };
+      }, listSelector);
+
+      try {
+        const selectors = buttonSelector.split(',').map(s => s.trim());
+        let clicked = false;
+
+        for (const sel of selectors) {
+          try {
+            await this.page.click(sel, { timeout: 1000 });
+            clicked = true;
+            break;
+          } catch (e) {
+            continue;
+          }
+        }
+
+        if (!clicked) {
+          return false;
+        }
+
+        await this.page.waitForTimeout(2000);
+
+      } catch (clickError: any) {
+        logger.warn(`Failed to click button: ${clickError.message}`);
+        return false;
+      }
+
+      const afterClickState = await this.page.evaluate((selector) => {
+        function evaluateSelector(sel: string, doc: Document) {
+          const isXPath = sel.startsWith('//') || sel.startsWith('(//');
+          if (isXPath) {
+            const result = doc.evaluate(sel, doc, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+            const elements = [];
+            for (let i = 0; i < result.snapshotLength; i++) {
+              elements.push(result.snapshotItem(i));
+            }
+            return elements;
+          } else {
+            return Array.from(doc.querySelectorAll(sel));
+          }
+        }
+
+        const listElements = evaluateSelector(selector, document);
+        return {
+          itemCount: listElements.length,
+          scrollHeight: document.documentElement.scrollHeight
+        };
+      }, listSelector);
+
+      logger.info(`After click: ${afterClickState.itemCount} items, scrollHeight: ${afterClickState.scrollHeight}`);
+
+      const itemsAdded = afterClickState.itemCount > initialState.itemCount;
+      const heightIncreased = afterClickState.scrollHeight > initialState.scrollHeight + 100;
+
+      if (itemsAdded || heightIncreased) {
+        const details = `Items: ${initialState.itemCount} → ${afterClickState.itemCount}, Height: ${initialState.scrollHeight} → ${afterClickState.scrollHeight}`;
+        logger.info(`Content loaded after click: ${details}`);
+        return true;
+      }
+
+      logger.info('No content change detected after clicking');
+      return false;
+
+    } catch (error: any) {
+      logger.error('Error during Load More test:', error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Test for infinite scroll by actually scrolling and checking if content loads
+   */
+  private async testInfiniteScrollByScrolling(listSelector: string): Promise<{
+    detected: boolean;
+    details?: string;
+  }> {
+    if (!this.page) {
+      return { detected: false };
+    }
+
+    try {
+      const initialState = await this.page.evaluate((selector) => {
+        function evaluateSelector(sel: string, doc: Document) {
+          const isXPath = sel.startsWith('//') || sel.startsWith('(//');
+          if (isXPath) {
+            const result = doc.evaluate(sel, doc, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+            const elements = [];
+            for (let i = 0; i < result.snapshotLength; i++) {
+              elements.push(result.snapshotItem(i));
+            }
+            return elements;
+          } else {
+            return Array.from(doc.querySelectorAll(sel));
+          }
+        }
+
+        const listElements = evaluateSelector(selector, document);
+        return {
+          itemCount: listElements.length,
+          scrollHeight: document.documentElement.scrollHeight,
+          scrollY: window.scrollY
+        };
+      }, listSelector);
+
+      logger.info(`Initial state: ${initialState.itemCount} items, scrollHeight: ${initialState.scrollHeight}`);
+
+      await this.page.evaluate(() => {
+        window.scrollTo(0, document.documentElement.scrollHeight);
+      });
+
+      await this.page.waitForTimeout(2000);
+
+      const afterScrollState = await this.page.evaluate((selector) => {
+        function evaluateSelector(sel: string, doc: Document) {
+          const isXPath = sel.startsWith('//') || sel.startsWith('(//');
+          if (isXPath) {
+            const result = doc.evaluate(sel, doc, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+            const elements = [];
+            for (let i = 0; i < result.snapshotLength; i++) {
+              elements.push(result.snapshotItem(i));
+            }
+            return elements;
+          } else {
+            return Array.from(doc.querySelectorAll(sel));
+          }
+        }
+
+        const listElements = evaluateSelector(selector, document);
+        return {
+          itemCount: listElements.length,
+          scrollHeight: document.documentElement.scrollHeight,
+          scrollY: window.scrollY
+        };
+      }, listSelector);
+
+      await this.page.evaluate((originalY) => {
+        window.scrollTo(0, originalY);
+      }, initialState.scrollY);
+
+  
+      const itemsAdded = afterScrollState.itemCount > initialState.itemCount;
+      const heightIncreased = afterScrollState.scrollHeight > initialState.scrollHeight + 100;
+
+      if (itemsAdded || heightIncreased) {
+        const details = `Items: ${initialState.itemCount} → ${afterScrollState.itemCount}, Height: ${initialState.scrollHeight} → ${afterScrollState.scrollHeight}`;
+        logger.info(`Content changed: ${details}`);
+        return { detected: true, details };
+      }
+
+      logger.info('No content change detected');
+      return { detected: false };
+
+    } catch (error: any) {
+      logger.error('Error during scroll test:', error.message);
+      return { detected: false };
+    }
+  }
+
+  /**
+   * Verify that a selector (or any of its comma-separated variants) matches at least one element on the page
+   */
+  private async verifySelectorExists(selector: string): Promise<boolean> {
+    if (!this.page || !selector) return false;
+    try {
+      const selectors = selector.split(',').map(s => s.trim()).filter(Boolean);
+      for (const sel of selectors) {
+        const count = await this.page.evaluate((s) => {
+          try {
+            return document.querySelectorAll(s).length;
+          } catch {
+            return 0;
+          }
+        }, sel);
+        if (count > 0) return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Fallback detection of a "next page" style button/link near the list, used when the
+   * primary detection's selector can't be verified or doesn't work as expected
+   */
+  private async detectNextButtonFallback(listSelector: string): Promise<{ type: string; selector: string | null }> {
+    if (!this.page) return { type: '', selector: null };
+
+    try {
+      const result = await this.page.evaluate((listSel) => {
+        const nextTextPatterns = [
+          /^\s*next\s*$/i,
+          /\bnext\s+page\b/i,
+          /^[>\s›→»⟩]+$/,
+          /^>>$/
+        ];
+
+        function isVisible(el: Element): boolean {
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return false;
+          const style = window.getComputedStyle(el);
+          if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
+          return true;
+        }
+
+        function isNearList(el: Element, listEl: Element | null): boolean {
+          if (!listEl) return true;
+          const elRect = el.getBoundingClientRect();
+          const listRect = listEl.getBoundingClientRect();
+          const verticalGap = Math.max(
+            0,
+            elRect.top - listRect.bottom,
+            listRect.top - elRect.bottom
+          );
+          return verticalGap <= 400;
+        }
+
+        function buildSelector(el: Element): string {
+          const id = el.getAttribute('id');
+          if (id) return `#${CSS.escape(id)}`;
+
+          const rel = el.getAttribute('rel');
+          if (rel === 'next') {
+            return `${el.tagName.toLowerCase()}[rel="next"]`;
+          }
+
+          const ariaLabel = el.getAttribute('aria-label');
+          if (ariaLabel) {
+            return `${el.tagName.toLowerCase()}[aria-label="${ariaLabel}"]`;
+          }
+
+          const classes = Array.from(el.classList).slice(0, 2).map(c => `.${CSS.escape(c)}`).join('');
+          return `${el.tagName.toLowerCase()}${classes}`;
+        }
+
+        let listEl: Element | null = null;
+        try {
+          if (listSel) {
+            const isXPath = listSel.startsWith('//') || listSel.startsWith('(//');
+            if (isXPath) {
+              const xpathResult = document.evaluate(listSel, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+              listEl = xpathResult.singleNodeValue as Element | null;
+            } else {
+              listEl = document.querySelector(listSel);
+            }
+          }
+        } catch {
+          listEl = null;
+        }
+
+        const candidates = Array.from(document.querySelectorAll('a[rel="next"], a, button, [role="button"]'));
+
+        for (const el of candidates) {
+          if (!isVisible(el)) continue;
+
+          const rel = el.getAttribute('rel');
+          if (rel === 'next') {
+            return { type: 'clickNext', selector: buildSelector(el) };
+          }
+
+          const text = (el.textContent || '').trim();
+          const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+
+          const matchesPattern = nextTextPatterns.some(pattern => pattern.test(text) || pattern.test(ariaLabel));
+          if (!matchesPattern) continue;
+
+          if (!isNearList(el, listEl)) continue;
+
+          return { type: 'clickNext', selector: buildSelector(el) };
+        }
+
+        return null;
+      }, listSelector);
+
+      if (result) {
+        return result;
+      }
+      return { type: '', selector: null };
+    } catch (error: any) {
+      logger.error('Error during next-button fallback detection:', error.message);
+      return { type: '', selector: null };
+    }
+  }
+
+  /**
+   * Clear page reference
+   */
+  async close(): Promise<void> {
+    this.page = null;
+    logger.info('Page reference cleared');
+  }
+}

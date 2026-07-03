@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "commonjs",
+    "outDir": "./dist",
+    "rootDir": "../",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "node",
+    "baseUrl": "../",
+    "paths": {
+      "*": ["*"],
+      "src/*": ["src/*"]
+    },
+    "jsx": "react-jsx",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true
+  },
+  "include": [
+    "src/**/*",
+    "../src/shared/**/*",
+    "../src/helpers/**/*",
+  ],
+  "exclude": [
+    "node_modules",
+    "src/mcp-worker.ts",
+    "../src/components/**/*",  // Exclude frontend components
+    "../src/pages/**/*",       // Exclude frontend pages
+    "../src/app/**/*",          // Exclude other frontend-specific code
+  ]
+}

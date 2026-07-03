@@ -1,0 +1,157 @@
+import axios from "axios";
+import { useState, useContext, useEffect } from "react";
+import { useNavigate, Link } from "react-router-dom";
+import { AuthContext } from "../context/auth";
+import { Box, Typography, TextField, Button, CircularProgress } from "@mui/material";
+import { useGlobalInfoStore } from "../context/globalInfo";
+import { apiUrl } from "../apiConfig";
+import { useTranslation } from 'react-i18next';
+import i18n from '../i18n';
+import { useThemeMode } from "../context/theme-provider";
+import MaxunLogo from "../assets/maxunlogo.png";
+
+const Login = () => {
+  const { t } = useTranslation();
+  // just don't remove these logs - god knows why it's not working without them
+  console.log(i18n)
+  console.log(t)
+  const [form, setForm] = useState({
+    email: "",
+    password: "",
+  });
+
+  const [loading, setLoading] = useState(false);
+  const { notify } = useGlobalInfoStore();
+  const { email, password } = form;
+
+  const { state, dispatch } = useContext(AuthContext);
+  const { user } = state;
+  const { darkMode } = useThemeMode();
+
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (user) {
+      navigate("/");
+    }
+  }, [user, navigate]);
+
+  const handleChange = (e: any) => {
+    const { name, value } = e.target;
+    setForm({ ...form, [name]: value });
+  };
+
+  const submitForm = async (e: any) => {
+    e.preventDefault();
+
+    if (!email.includes("@")) {
+      notify("error", "Please enter a valid email.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { data } = await axios.post(
+        `${apiUrl}/auth/login`,
+        { email, password },
+        { withCredentials: true }
+      );
+      dispatch({ type: "LOGIN", payload: data });
+      window.localStorage.setItem("user", JSON.stringify(data));
+      navigate("/");
+    } catch (err: any) {
+      const errorResponse = err.response?.data;
+
+      const errorMessage = errorResponse?.code
+        ? t(errorResponse.code)
+        : t('login.error.generic');
+
+      notify("error", errorMessage);
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Box
+      sx={{
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+        maxHeight: "100vh",
+        mt: 6,
+        padding: 4,
+        backgroundColor: "inherit",
+      }}
+    >
+      <Box
+        component="form"
+        onSubmit={submitForm}
+        sx={{
+          textAlign: "center",
+          backgroundColor: darkMode ? "#121111ff" : "#ffffff",
+          color: darkMode ? "#ffffff" : "#333333",
+          padding: 6,
+          borderRadius: 5,
+          boxShadow: "0px 20px 40px rgba(0, 0, 0, 0.2), 0px -5px 10px rgba(0, 0, 0, 0.15)",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          maxWidth: 500,
+          width: "100%",
+        }}
+      >
+        <img src={MaxunLogo} alt="logo" height={50}
+          width={60} style={{ marginBottom: 10, borderRadius: "20%", alignItems: "center" }} />
+        <TextField
+          fullWidth
+          label={t('login.email')}
+          name="email"
+          value={email}
+          onChange={handleChange}
+          margin="normal"
+          variant="outlined"
+          required
+        />
+        <TextField
+          fullWidth
+          label={t('login.password')}
+          name="password"
+          type="password"
+          value={password}
+          onChange={handleChange}
+          margin="normal"
+          variant="outlined"
+          required
+        />
+        <Button
+          type="submit"
+          fullWidth
+          variant="contained"
+          color="primary"
+          sx={{
+            mt: 2,
+            mb: 2,
+          }}
+          disabled={loading || !email || !password}
+        >
+          {loading ? (
+            <>
+              <CircularProgress size={20} sx={{ mr: 2 }} />
+              {t('login.loading')}
+            </>
+          ) : (
+            t('login.button')
+          )}
+        </Button>
+        <Typography variant="body2" align="center">
+          {t('login.register_prompt')}{" "}
+          <Link to="/register" style={{ textDecoration: "none", color: "#ff33cc" }}>
+            {t('login.register_link')}
+          </Link>
+        </Typography>
+      </Box>
+    </Box>
+  );
+};
+
+export default Login;

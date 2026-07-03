@@ -1,0 +1,278 @@
+import React, { useState, useEffect } from 'react';
+import {
+  Box,
+  Button,
+  Typography,
+  IconButton,
+  CircularProgress,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Tooltip,
+  Paper,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+} from '@mui/material';
+import { ContentCopy, Visibility, VisibilityOff, Delete } from '@mui/icons-material';
+import styled from 'styled-components';
+import axios from 'axios';
+import { useGlobalInfoStore } from '../../context/globalInfo';
+import { apiUrl } from '../../apiConfig';
+import { useTranslation } from 'react-i18next';
+
+const Container = styled(Box)`
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: 50px;
+  margin-left: 70px;
+  margin-right: 70px;
+`;
+
+const ApiKeyManager = () => {
+  const { t } = useTranslation();
+  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [apiKeyName, setApiKeyName] = useState<string>(t('apikey.default_name'));
+  const [apiKeyCreatedAt, setApiKeyCreatedAt] = useState<string | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [showKey, setShowKey] = useState<boolean>(false);
+  const [copySuccess, setCopySuccess] = useState<boolean>(false);
+
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState<boolean>(false);
+
+  const { notify } = useGlobalInfoStore();
+
+  useEffect(() => {
+    const fetchApiKey = async () => {
+      try {
+        const { data } = await axios.get(`${apiUrl}/auth/api-key`);
+        setApiKey(data.api_key);
+        setApiKeyCreatedAt(data.api_key_created_at);
+      } catch (error: any) {
+        notify('error', t('apikey.notifications.fetch_error', { error: error.message }));
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchApiKey();
+  }, []);
+
+  const generateApiKey = async () => {
+    setLoading(true);
+    try {
+      const { data } = await axios.post(`${apiUrl}/auth/generate-api-key`);
+      setApiKey(data.api_key);
+      setApiKeyCreatedAt(data.api_key_created_at);
+      notify('success', t('apikey.notifications.generate_success'));
+    } catch (error: any) {
+      notify('error', t('apikey.notifications.generate_error', { error: error.message }));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const deleteApiKey = async () => {
+    setLoading(true);
+    try {
+      await axios.delete(`${apiUrl}/auth/delete-api-key`);
+      setApiKey(null);
+      setApiKeyCreatedAt(null);
+      notify('success', t('apikey.notifications.delete_success'));
+    } catch (error: any) {
+      notify('error', t('apikey.notifications.delete_error', { error: error.message }));
+    } finally {
+      setLoading(false);
+      setConfirmDeleteOpen(false);
+    }
+  };
+
+  const copyToClipboard = () => {
+    if (!apiKey) return;
+
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(apiKey).then(() => {
+        setCopySuccess(true);
+        setTimeout(() => setCopySuccess(false), 2000);
+        notify('info', t('apikey.notifications.copy_success'));
+      }).catch(() => {
+        notify('error', t('apikey.notifications.copy_error'));
+      });
+    } else {
+      const textarea = document.createElement('textarea');
+      textarea.value = apiKey;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      try {
+        document.execCommand('copy');
+        setCopySuccess(true);
+        setTimeout(() => setCopySuccess(false), 2000);
+        notify('info', t('apikey.notifications.copy_success'));
+      } catch {
+        notify('error', t('apikey.notifications.copy_error'));
+      } finally {
+        document.body.removeChild(textarea);
+      }
+    }
+  };
+
+  const handleDeleteClick = () => {
+    setConfirmDeleteOpen(true);
+  };
+
+  const handleDeleteCancel = () => {
+    setConfirmDeleteOpen(false);
+  };
+
+  const handleDeleteConfirm = () => {
+    setConfirmDeleteOpen(false);
+    deleteApiKey();
+  };
+
+  if (loading) {
+    return (
+      <Box
+        sx={{
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          height: '100vh',
+          width: '100vw',
+        }}
+      >
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  return (
+    <Container sx={{ alignSelf: 'flex-start' }}>
+      <Typography variant="body1" sx={{ marginBottom: '40px' }}>
+        Start by creating an API key below. Then,
+        <a
+          href={`${apiUrl}/api-docs/`}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ textDecoration: 'none', marginLeft: '5px', marginRight: '5px' }}
+        >
+          test your API
+        </a>
+        or read the{' '}
+        <a
+          href="https://docs.maxun.dev/category/api-docs"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ textDecoration: 'none' }}
+        >
+          API documentation
+        </a>{' '}
+        for setup instructions.
+      </Typography>
+
+      <Typography
+        variant="h6"
+        gutterBottom
+        component="div"
+        style={{ marginBottom: '20px', textAlign: 'left', width: '100%' }}
+      >
+        {t('apikey.title')}
+      </Typography>
+
+      {apiKey ? (
+        <TableContainer component={Paper} sx={{ width: '100%', overflow: 'hidden' }}>
+          <Table sx={{ tableLayout: 'fixed', width: '100%' }}>
+            <TableHead>
+              <TableRow>
+                <TableCell>{t('apikey.table.name')}</TableCell>
+                <TableCell>{t('apikey.table.key')}</TableCell>
+                {apiKeyCreatedAt && <TableCell>Created On</TableCell>}
+                <TableCell align="center" sx={{ width: 160 }}>
+                  {t('apikey.table.actions')}
+                </TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              <TableRow>
+                <TableCell>{apiKeyName}</TableCell>
+                <TableCell>
+                  <Box sx={{ fontFamily: 'monospace', width: '20ch' }}>
+                    {showKey ? `${apiKey?.substring(0, 10)}...` : '**********'}
+                  </Box>
+                </TableCell>
+                {apiKeyCreatedAt && (
+                  <TableCell>
+                    {new Date(apiKeyCreatedAt).toLocaleDateString('en-US', {
+                      month: 'short',
+                      day: 'numeric',
+                      year: 'numeric',
+                    })}
+                  </TableCell>
+                )}
+                <TableCell align="right" sx={{ width: 160 }}>
+                  <Tooltip title={t('apikey.actions.copy')}>
+                    <IconButton onClick={copyToClipboard}>
+                      <ContentCopy />
+                    </IconButton>
+                  </Tooltip>
+
+                  <Tooltip title={showKey ? t('apikey.actions.hide') : t('apikey.actions.show')}>
+                    <IconButton onClick={() => setShowKey(!showKey)}>
+                      {showKey ? <VisibilityOff /> : <Visibility />}
+                    </IconButton>
+                  </Tooltip>
+
+                  <Tooltip title={t('apikey.actions.delete')}>
+                    <IconButton onClick={handleDeleteClick} color="error">
+                      <Delete />
+                    </IconButton>
+                  </Tooltip>
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </TableContainer>
+      ) : (
+        <>
+          <Typography>{t('apikey.no_key_message')}</Typography>
+          <Button
+            onClick={generateApiKey}
+            variant="contained"
+            color="primary"
+            sx={{ marginTop: '20px' }}
+          >
+            {t('apikey.generate_button')}
+          </Button>
+        </>
+      )}
+
+      <Dialog open={confirmDeleteOpen} onClose={handleDeleteCancel}>
+        <DialogTitle>Delete API Key</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Are you sure you want to delete this API key? This action cannot be undone and
+            will immediately invalidate the key.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button color='inherit' onClick={handleDeleteCancel}>
+            Cancel
+          </Button>
+          <Button onClick={handleDeleteConfirm} color="error" variant="contained">
+            Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Container>
+  );
+};
+
+export default ApiKeyManager;

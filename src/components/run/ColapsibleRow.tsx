@@ -1,0 +1,380 @@
+import { useEffect, useRef, useState } from "react";
+import * as React from "react";
+import TableRow from "@mui/material/TableRow";
+import TableCell from "@mui/material/TableCell";
+import {
+  Box, Collapse, IconButton, Typography, Chip, TextField, Dialog, DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  CircularProgress,
+} from "@mui/material";
+import { Button } from "@mui/material";
+import { DeleteForever, KeyboardArrowDown, KeyboardArrowUp, Settings } from "@mui/icons-material";
+import { deleteRunFromStorage, getStoredRun } from "../../api/storage";
+import { columns, Data } from "./RunsTable";
+import { RunContent } from "./RunContent";
+import { getUserById } from "../../api/auth";
+import { useTranslation } from "react-i18next";
+import { useTheme } from "@mui/material/styles";
+import { getOrCreateBrowserSocket, releaseBrowserSocket } from "../../utils/browserSocket";
+
+interface RunTypeChipProps {
+  runByUserId?: string;
+  runByScheduledId?: string;
+  runByAPI: boolean;
+  runBySDK?: boolean;
+  runByMCP?: boolean;
+  runByCLI?: boolean;
+}
+
+const RunTypeChip: React.FC<RunTypeChipProps> = ({ runByUserId, runByScheduledId, runByAPI, runBySDK, runByMCP, runByCLI }) => {
+  const { t } = useTranslation();
+
+  if (runByScheduledId) return <Chip label={t('runs_table.run_type_chips.scheduled_run')} color="primary" variant="outlined" />;
+  if (runByCLI) return <Chip label={t('runs_table.run_type_chips.cli')} color="primary" variant="outlined" />;
+  if (runByMCP) return <Chip label={t('runs_table.run_type_chips.mcp')} color="primary" variant="outlined" />;
+  if (runBySDK) return <Chip label={t('runs_table.run_type_chips.sdk')} color="primary" variant="outlined" />;
+  if (runByAPI) return <Chip label={t('runs_table.run_type_chips.api')} color="primary" variant="outlined" />;
+  if (runByUserId) return <Chip label={t('runs_table.run_type_chips.manual_run')} color="primary" variant="outlined" />;
+  return <Chip label={t('runs_table.run_type_chips.unknown_run_type')} color="primary" variant="outlined" />;
+};
+
+interface CollapsibleRowProps {
+  row: Data;
+  handleDelete: () => void;
+  isOpen: boolean;
+  onToggleExpanded: (shouldExpand: boolean) => void;
+  currentLog: string;
+  abortRunHandler: (runId: string, robotName: string, browserId: string) => void;
+  runningRecordingName: string;
+  urlRunId: string | null;
+}
+export const CollapsibleRow = ({ row, handleDelete, isOpen, onToggleExpanded, currentLog, abortRunHandler, runningRecordingName, urlRunId }: CollapsibleRowProps) => {
+  const { t } = useTranslation();
+  const theme = useTheme();
+  const [isDeleteOpen, setDeleteOpen] = useState(false);
+  const [openSettingsModal, setOpenSettingsModal] = useState(false);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [runDetails, setRunDetails] = useState<Data>(row);
+  const [isLoadingRunDetails, setIsLoadingRunDetails] = useState(false);
+  const runByLabel = row.runByScheduleId
+    ? `${row.runByScheduleId}`
+    : row.runByUserId
+      ? `${userEmail}`
+      : row.runByCLI
+        ? 'CLI'
+        : row.runByMCP
+          ? 'MCP'
+          : row.runBySDK
+            ? 'SDK'
+            : row.runByAPI
+              ? 'API'
+              : 'Unknown';
+
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+
+  const [workflowProgress, setWorkflowProgress] = useState<{
+    current: number;
+    total: number;
+    percentage: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!row.browserId || row.status !== 'running') return;
+
+    const socket = getOrCreateBrowserSocket(row.browserId);
+    const callback = (data: any) => {
+      setWorkflowProgress(data);
+    };
+
+    socket.on('workflowProgress', callback);
+
+    return () => {
+      socket.off('workflowProgress', callback);
+      releaseBrowserSocket(row.browserId);
+    };
+  }, [row.browserId, row.status]);
+
+  useEffect(() => {
+    if (row.status !== 'running' && row.status !== 'queued') {
+      setWorkflowProgress(null);
+    }
+  }, [row.status]);
+
+  const handleAbort = () => {
+    abortRunHandler(row.runId, row.name, row.browserId);
+  }
+
+  const handleRowExpand = () => {
+    const newOpen = !isOpen;
+    onToggleExpanded(newOpen);
+  };
+
+  useEffect(() => {
+    setRunDetails(prev => {
+      if (prev.runId !== row.runId) return row;
+      return {
+        ...row,
+        serializableOutput: prev.serializableOutput ?? row.serializableOutput,
+        binaryOutput: prev.binaryOutput ?? row.binaryOutput,
+      };
+    });
+  }, [row]);
+
+  useEffect(() => {
+    const hasOutputLoaded =
+      runDetails.serializableOutput !== undefined &&
+      runDetails.binaryOutput !== undefined;
+
+    if (!isOpen || row.status === 'running' || row.status === 'queued' || hasOutputLoaded) return;
+
+    let isCancelled = false;
+    setIsLoadingRunDetails(true);
+
+    getStoredRun(row.runId)
+      .then((run) => {
+        if (!run || isCancelled) return;
+        setRunDetails(prev => ({ ...prev, ...run }));
+      })
+      .finally(() => {
+        if (!isCancelled) {
+          setIsLoadingRunDetails(false);
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [isOpen, row.runId, row.status, runDetails.serializableOutput, runDetails.binaryOutput]);
+
+  useEffect(() => {
+    const fetchUserEmail = async () => {
+      if (row.runByUserId) {
+        const userData = await getUserById(row.runByUserId);
+        if (userData && userData.user) {
+          setUserEmail(userData.user.email);
+        }
+      }
+    };
+    fetchUserEmail();
+  }, [row.runByUserId]);
+
+  const handleConfirmDelete = async () => {
+    try {
+      const res = await deleteRunFromStorage(`${row.runId}`);
+      if (res) {
+        handleDelete();
+      }
+    } finally {
+      setDeleteOpen(false);
+    }
+  };
+
+  return (
+    <React.Fragment>
+      <TableRow sx={{ '& > *': { borderBottom: 'unset' } }} hover role="checkbox" tabIndex={-1} key={row.id}>
+        <TableCell>
+          <IconButton
+            aria-label="expand row"
+            size="small"
+            onClick={handleRowExpand}
+          >
+            {isOpen ? <KeyboardArrowUp /> : <KeyboardArrowDown />}
+          </IconButton>
+        </TableCell>
+        {columns.map((column) => {
+          // @ts-ignore
+          const value: any = row[column.id];
+          if (value !== undefined) {
+            return (
+              <TableCell key={column.id} align={column.align}>
+                {value}
+              </TableCell>
+            );
+          } else {
+            switch (column.id) {
+              case 'runStatus':
+                return (
+                  <TableCell key={column.id} align={column.align}>
+                    {row.status === 'success' && <Chip label={t('runs_table.run_status_chips.success')} color="success" variant="outlined" />}
+                    {row.status === 'running' && <Chip label={t('runs_table.run_status_chips.running')} color="warning" variant="outlined" />}
+                    {row.status === 'scheduled' && <Chip label={t('runs_table.run_status_chips.scheduled')} variant="outlined" />}
+                    {row.status === 'queued' && <Chip label={t('runs_table.run_status_chips.queued')} variant="outlined" />}
+                    {row.status === 'failed' && <Chip label={t('runs_table.run_status_chips.failed')} color="error" variant="outlined" />}
+                    {row.status === 'aborted' && <Chip label={t('runs_table.run_status_chips.aborted')} color="error" variant="outlined" />}
+                  </TableCell>
+                )
+              case 'delete':
+                return (
+                  <TableCell key={column.id} align={column.align}>
+                    <IconButton aria-label="delete" size="small" onClick={() => setDeleteOpen(true)}>
+                      <DeleteForever />
+                    </IconButton>
+                  </TableCell>
+                );
+              case 'settings':
+                return (
+                  <TableCell key={column.id} align={column.align}>
+                    <IconButton aria-label="settings" size="small" onClick={() => setOpenSettingsModal(true)}>
+                      <Settings />
+                    </IconButton>
+                    <Dialog
+                      open={openSettingsModal}
+                      onClose={() => setOpenSettingsModal(false)}
+                      maxWidth="sm"
+                      fullWidth
+                      PaperProps={{
+                        sx: {
+                          borderRadius: 2
+                        }
+                      }}
+                    >
+                      <DialogTitle>
+                        {t('runs_table.run_settings_modal.title')}
+                      </DialogTitle>
+
+                      <DialogContent>
+                        <Box
+                          sx={{
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 2.5,
+                            mt: 1
+                          }}
+                        >
+                          <TextField
+                            label={t('runs_table.run_settings_modal.labels.run_id')}
+                            value={row.runId}
+                            InputProps={{ readOnly: true }}
+                            fullWidth
+                          />
+
+                          <TextField
+                            label={
+                              row.runByScheduleId
+                                ? t('runs_table.run_settings_modal.labels.run_by_schedule')
+                                : row.runByUserId
+                                  ? t('runs_table.run_settings_modal.labels.run_by_user')
+                                  : row.runByCLI
+                                    ? t('runs_table.run_settings_modal.labels.run_by_cli')
+                                    : row.runByMCP
+                                      ? t('runs_table.run_settings_modal.labels.run_by_mcp')
+                                      : row.runBySDK
+                                        ? t('runs_table.run_settings_modal.labels.run_by_sdk')
+                                        : row.runByAPI
+                                          ? t('runs_table.run_settings_modal.labels.run_by_api')
+                                          : t('runs_table.run_settings_modal.labels.run_by_unknown')
+                            }
+                            value={runByLabel}
+                            InputProps={{ readOnly: true }}
+                            fullWidth
+                          />
+
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                            <Typography variant="body1">
+                              {t('runs_table.run_settings_modal.labels.run_type')}:
+                            </Typography>
+
+                            <RunTypeChip
+                              runByUserId={row.runByUserId}
+                              runByScheduledId={row.runByScheduleId}
+                              runByAPI={row.runByAPI ?? false}
+                              runBySDK={row.runBySDK}
+                              runByMCP={row.runByMCP}
+                              runByCLI={row.runByCLI}
+                            />
+                          </Box>
+                        </Box>
+                      </DialogContent>
+                    </Dialog>
+                  </TableCell>
+                )
+              default:
+                return null;
+            }
+          }
+        })}
+      </TableRow>
+      <TableRow>
+        <TableCell style={{ paddingBottom: 0, paddingTop: 0 }} colSpan={6}>
+          <Collapse in={isOpen} timeout="auto" unmountOnExit>
+            {isLoadingRunDetails ? (
+              <Box display="flex" justifyContent="center" py={3}>
+                <CircularProgress size={24} />
+              </Box>
+            ) : (
+              <RunContent row={runDetails} abortRunHandler={handleAbort} currentLog={currentLog}
+                logEndRef={logEndRef} interpretationInProgress={runningRecordingName === row.name}
+                workflowProgress={workflowProgress} />
+            )}
+          </Collapse>
+        </TableCell>
+      </TableRow>
+
+      <Dialog
+        open={isDeleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        maxWidth="xs"
+        fullWidth
+        PaperProps={{
+          sx: {
+            p: 0,
+            backgroundColor: theme.palette.mode === 'dark'
+              ? theme.palette.grey[900]
+              : theme.palette.background.paper,
+            borderRadius: 2,
+            width: { xs: '90vw', sm: '460px', md: '420px' },
+            maxWidth: '90vw',
+            boxSizing: 'border-box'
+          }
+        }}
+      >
+        <DialogTitle>
+          {t('runs_table.delete_confirm.title', {
+            name: row.name,
+            defaultValue: 'Delete run "{{name}}"?'
+          })}
+        </DialogTitle>
+
+        <DialogContent>
+          <DialogContentText sx={{ mb: 1 }}>
+            {t('runs_table.delete_confirm.message', {
+              name: row.name,
+              defaultValue: 'Are you sure you want to delete the run "{{name}}"?'
+            })}
+          </DialogContentText>
+        </DialogContent>
+
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button
+            onClick={() => setDeleteOpen(false)}
+            color='inherit'
+          >
+            {t('common.cancel', { defaultValue: 'Cancel' })}
+          </Button>
+
+          <Button
+            onClick={handleConfirmDelete}
+            variant="contained"
+            color="error"
+          >
+            {t('common.delete', { defaultValue: 'Delete' })}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </React.Fragment>
+  );
+}
+
+export const modalStyle = {
+  top: '45%',
+  left: '50%',
+  transform: 'translate(-50%, -50%)',
+  width: '30%',
+  backgroundColor: 'background.paper',
+  p: 4,
+  height: 'fit-content',
+  display: 'block',
+  padding: '20px',
+};

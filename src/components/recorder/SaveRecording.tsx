@@ -1,0 +1,224 @@
+import React, { useCallback, useEffect, useState, useContext } from 'react';
+import { Button, Box, LinearProgress, Tooltip, Dialog, DialogTitle, DialogContent } from "@mui/material";
+import { stopRecording } from "../../api/recording";
+import { useGlobalInfoStore } from "../../context/globalInfo";
+import { AuthContext } from '../../context/auth';
+import { useSocketStore } from "../../context/socket";
+import { TextField } from "@mui/material";
+import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+
+interface SaveRecordingProps {
+  fileName: string;
+}
+
+export const SaveRecording = ({ fileName }: SaveRecordingProps) => {
+  const { t } = useTranslation();
+  const [openModal, setOpenModal] = useState<boolean>(false);
+  const [saveRecordingName, setSaveRecordingName] = useState<string>(fileName);
+  const [waitingForSave, setWaitingForSave] = useState<boolean>(false);
+
+  const { browserId, setBrowserId, notify, recordings, isLogin, recordingName, retrainRobotId, currentWorkflowActionsState } = useGlobalInfoStore();
+  const { socket } = useSocketStore();
+  const { state, dispatch } = useContext(AuthContext);
+  const { user } = state;
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (recordingName) {
+      setSaveRecordingName(recordingName);
+    }
+  }, [recordingName]);
+
+  const handleChangeOfTitle = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setSaveRecordingName(event.target.value);
+  }
+
+  const handleSaveRecording = async (event: React.SyntheticEvent) => {
+    event.preventDefault();
+    const trimmedName = saveRecordingName.trim();
+    if (!retrainRobotId && recordings.some(r => r.trim().toLowerCase() === trimmedName.toLowerCase())) {
+      notify('error', t('save_recording.errors.name_exists'));
+      return;
+    }
+    await saveRecording();
+  };
+
+  const handleFinishClick = () => {
+    const { hasScrapeListAction, hasScreenshotAction, hasScrapeSchemaAction } = currentWorkflowActionsState;
+    const hasAnyAction = hasScrapeListAction || hasScreenshotAction || hasScrapeSchemaAction;
+
+    if (!hasAnyAction) {
+      notify('warning', t('save_recording.errors.no_actions_performed'));
+      return;
+    }
+
+    if (recordingName && !recordings.includes(recordingName)) {
+      saveRecording();
+    } else {
+      setOpenModal(true);
+    }
+  };
+
+  const exitRecording = useCallback(async (data?: { actionType: string }) => {
+    let successMessage = t('save_recording.notifications.save_success');
+
+    if (data && data.actionType) {
+      if (data.actionType === 'retrained') {
+        successMessage = t('save_recording.notifications.retrain_success');
+      } else if (data.actionType === 'saved') {
+        successMessage = t('save_recording.notifications.save_success');
+      } else if (data.actionType === 'error') {
+        successMessage = t('save_recording.notifications.save_error');
+      }
+    }
+
+    const notificationData = {
+      type: data?.actionType === 'error' ? 'error' : 'success',
+      message: successMessage,
+      timestamp: Date.now()
+    };
+    window.sessionStorage.setItem('pendingNotification', JSON.stringify(notificationData));
+
+    if (window.opener) {
+      window.opener.postMessage({
+        type: 'recording-notification',
+        notification: notificationData
+      }, '*');
+
+      window.opener.postMessage({
+        type: 'session-data-clear',
+        timestamp: Date.now()
+      }, '*');
+    }
+
+    if (browserId) {
+      await stopRecording(browserId);
+    }
+    setBrowserId(null);
+
+    window.close();
+  }, [setBrowserId, browserId, t]);
+
+  // notifies backed to save the recording in progress,
+  // releases resources and changes the view for main page by clearing the global browserId
+  const saveRecording = async () => {
+    if (user) {
+      const { hasScrapeListAction, hasScreenshotAction, hasScrapeSchemaAction } = currentWorkflowActionsState;
+      const hasAnyAction = hasScrapeListAction || hasScreenshotAction || hasScrapeSchemaAction;
+
+      if (!hasAnyAction) {
+        notify('warning', t('save_recording.errors.no_actions_performed'));
+        return;
+      }
+
+      const payload = {
+        fileName: (saveRecordingName || recordingName).trim(),
+        userId: user.id,
+        isLogin: isLogin,
+        robotId: retrainRobotId,
+      };
+      socket?.emit('save', payload);
+      setWaitingForSave(true);
+      console.log(`Saving the recording as ${saveRecordingName || recordingName} for userId ${user.id}`);
+    } else {
+      console.error(t('save_recording.notifications.user_not_logged'));
+    }
+  };
+
+  const handleFileSaved = useCallback(async (data?: { actionType: string }) => {
+    if (data?.actionType === 'nameExists') {
+      setWaitingForSave(false);
+      notify('error', t('save_recording.errors.name_exists'));
+      return;
+    }
+    await exitRecording(data);
+  }, [exitRecording, notify, t]);
+
+  useEffect(() => {
+    socket?.on('fileSaved', handleFileSaved);
+    return () => {
+      socket?.off('fileSaved', handleFileSaved);
+    }
+  }, [socket, handleFileSaved]);
+
+  return (
+    <div>
+      <Button
+        onClick={handleFinishClick}
+        variant="outlined"
+        color="success"
+        sx={{
+          marginRight: '20px',
+          color: '#00c853 !important',
+          borderColor: '#00c853 !important',
+          backgroundColor: 'whitesmoke !important',
+        }}
+        size="small"
+      >
+        {t('right_panel.buttons.finish')}
+      </Button>
+
+      <Dialog
+        open={openModal}
+        onClose={() => setOpenModal(false)}
+        maxWidth="xs"
+        fullWidth
+        PaperProps={{
+          sx: {
+            p: 0,
+            borderRadius: 2
+          }
+        }}
+      >
+        <DialogTitle>
+          {t('save_recording.title')}
+        </DialogTitle>
+
+        <DialogContent>
+          <form
+            onSubmit={handleSaveRecording}
+            style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}
+          >
+            <TextField
+              required
+              sx={{ width: '300px', margin: '15px 0px' }}
+              onChange={handleChangeOfTitle}
+              id="title"
+              label={t('save_recording.robot_name')}
+              variant="outlined"
+              value={saveRecordingName}
+            />
+
+            <Button type="submit" variant="contained" sx={{ marginTop: '10px' }}>
+              {t('save_recording.buttons.save')}
+            </Button>
+
+            {waitingForSave && (
+              <Tooltip
+                title={t('save_recording.tooltips.optimizing')}
+                placement="bottom"
+              >
+                <Box sx={{ width: '100%', marginTop: '10px' }}>
+                  <LinearProgress />
+                </Box>
+              </Tooltip>
+            )}
+          </form>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+const modalStyle = {
+  top: '25%',
+  left: '50%',
+  transform: 'translate(-50%, -50%)',
+  width: '30%',
+  backgroundColor: 'background.paper',
+  p: 4,
+  height: 'fit-content',
+  display: 'block',
+  padding: '20px',
+};

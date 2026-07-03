@@ -1,0 +1,135 @@
+services:
+  postgres:
+    image: postgres:13
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "${DB_PORT:-5432}:${DB_PORT:-5432}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    command: server /data --console-address :${MINIO_CONSOLE_PORT:-9001}
+    ports:
+      - "${MINIO_PORT:-9000}:${MINIO_PORT:-9000}"  # API port
+      - "${MINIO_CONSOLE_PORT:-9001}:${MINIO_CONSOLE_PORT:-9001}"  # WebUI port
+    volumes:
+      - minio_data:/data
+
+  backend:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile.backend
+    image: getmaxun/maxun-backend:latest
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-8080}:${BACKEND_PORT:-8080}"
+    env_file: .env
+    environment:
+      BACKEND_URL: ${BACKEND_URL}
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 0
+      CI: "true"
+      CONTAINER: "true"
+      # DEBUG: pw:api
+      # PWDEBUG: 1
+      CHROMIUM_FLAGS: '--disable-gpu --no-sandbox --headless=new'
+    security_opt:
+    - seccomp=unconfined
+    shm_size: '2gb'
+    mem_limit: 6g
+    depends_on:
+      - postgres
+      - minio
+    volumes:
+      - /var/run/dbus:/var/run/dbus
+
+  frontend:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile.frontend 
+    image: getmaxun/maxun-frontend:latest
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-5173}:${FRONTEND_PORT:-5173}"
+    env_file: .env
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL}
+      BACKEND_URL: ${BACKEND_URL}
+    depends_on:
+      - backend
+
+  browser:
+    # build:
+    #   context: .
+    #   dockerfile: browser/Dockerfile
+    #   args:
+    #     BROWSER_WS_PORT: ${BROWSER_WS_PORT:-3001}
+    #     BROWSER_HEALTH_PORT: ${BROWSER_HEALTH_PORT:-3002}
+    image: getmaxun/maxun-browser:latest
+    ports:
+      - "${BROWSER_WS_PORT:-3001}:${BROWSER_WS_PORT:-3001}"
+      - "${BROWSER_HEALTH_PORT:-3002}:${BROWSER_HEALTH_PORT:-3002}"
+    environment:
+      - NODE_ENV=production
+      - DEBUG=pw:browser*
+      - BROWSER_WS_PORT=${BROWSER_WS_PORT:-3001}
+      - BROWSER_HEALTH_PORT=${BROWSER_HEALTH_PORT:-3002}
+      - BROWSER_WS_HOST=${BROWSER_WS_HOST:-browser}
+      - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${BROWSER_HEALTH_PORT:-3002}/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.5'
+        reservations:
+          memory: 1G
+          cpus: '1.0'
+    security_opt:
+      - seccomp:unconfined
+    shm_size: 2gb
+    cap_add:
+      - SYS_ADMIN
+
+  webhook-mailer:
+    build:
+      context: ./webhook-mailer
+      dockerfile: Dockerfile
+    environment:
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      TO_EMAIL: ${TO_EMAIL}
+      MAXUN_PUBLIC_URL: ${PUBLIC_URL:-http://localhost:5173}
+      PORT: 3000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  postgres_data:
+  minio_data:

@@ -1,0 +1,2344 @@
+import { Router } from 'express';
+import multer from 'multer';
+import logger from "../logger";
+import { createRemoteBrowserForRun, destroyRemoteBrowser, getActiveBrowserIdByState } from "../browser-management/controller";
+import { browserPool } from "../server";
+import { v4 as uuid } from "uuid";
+import moment from 'moment-timezone';
+import cron from 'node-cron';
+import { requireSignIn } from '../middlewares/auth';
+import Robot from '../models/Robot';
+import Run from '../models/Run';
+import { AuthenticatedRequest } from './record';
+import { computeNextRun } from '../utils/schedule';
+import { capture } from "../utils/analytics";
+import { encrypt, decrypt } from '../utils/auth';
+import { WorkflowFile } from 'maxun-core';
+import { cancelScheduledWorkflow, scheduleWorkflow } from '../storage/schedule';
+import { addJob } from '../storage/graphileWorker';
+import { QUEUE_NAMES } from '../task-runner';
+import { io as serverIo, recentRecoveries } from '../server';
+import { WorkflowEnricher } from '../sdk/workflowEnricher';
+import sequelizeInstance from '../storage/db';
+import { Op, literal } from 'sequelize';
+import {
+  DEFAULT_OUTPUT_FORMATS,
+  parseOutputFormats,
+  SEARCH_SCRAPE_OUTPUT_FORMAT_OPTIONS,
+  SCRAPE_OUTPUT_FORMAT_OPTIONS,
+  OutputFormats,
+} from '../constants/output-formats';
+import { MAX_FILE_SIZE_BYTES } from '../workflow-management/classes/DocumentInterpreter';
+import { createDocumentRobotRecord } from '../utils/document/createDocumentRobotRecord';
+import { createDocumentParseRobotRecord } from '../utils/document/createDocumentParseRobotRecord';
+
+export const router = Router();
+
+const pdfUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_SIZE_BYTES },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF files are allowed'));
+    }
+  },
+});
+
+const normalizeRobotUrl = (rawUrl: string): string => {
+  const normalizedUrl = new URL(rawUrl.trim());
+  if (!['http:', 'https:'].includes(normalizedUrl.protocol)) {
+    throw new Error('Invalid URL protocol');
+  }
+
+  normalizedUrl.search = normalizedUrl.searchParams.toString();
+  return normalizedUrl.toString();
+};
+
+const normalizeWorkflowUrls = (workflow: any[] = []): any[] =>
+  workflow.map((pair: any) => ({
+    ...pair,
+    where: pair?.where
+      ? {
+          ...pair.where,
+          ...(typeof pair.where.url === 'string' && pair.where.url !== 'about:blank'
+            ? { url: normalizeRobotUrl(pair.where.url) }
+            : {}),
+        }
+      : pair?.where,
+    what: Array.isArray(pair?.what)
+      ? pair.what.map((action: any) => {
+          if (
+            action.action === 'goto' &&
+            Array.isArray(action.args) &&
+            typeof action.args[0] === 'string' &&
+            action.args[0] !== 'about:blank'
+          ) {
+            return {
+              ...action,
+              args: [normalizeRobotUrl(action.args[0]), ...action.args.slice(1)],
+            };
+          }
+
+          if (
+            (action.action === 'scrape' || action.action === 'crawl') &&
+            Array.isArray(action.args) &&
+            action.args[0] &&
+            typeof action.args[0] === 'object' &&
+            typeof action.args[0].url === 'string' &&
+            action.args[0].url !== 'about:blank'
+          ) {
+            return {
+              ...action,
+              args: [
+                {
+                  ...action.args[0],
+                  url: normalizeRobotUrl(action.args[0].url),
+                },
+                ...action.args.slice(1),
+              ],
+            };
+          }
+
+          return action;
+        })
+      : pair?.what,
+  }));
+
+async function isRobotNameTaken(name: string, userId: number, excludeId?: string): Promise<boolean> {
+  const trimmed = name.trim();
+  const robots = await Robot.findAll({
+    where: {
+      userId,
+      [Op.and]: sequelizeInstance.where(
+        sequelizeInstance.fn('trim', sequelizeInstance.literal("recording_meta->>'name'")),
+        trimmed
+      ),
+    } as any,
+  });
+  if (robots.length === 0) return false;
+  if (excludeId) {
+    return robots.some((r: any) => r.recording_meta.id !== excludeId);
+  }
+  return true;
+}
+
+export const processWorkflowActions = async (workflow: any[], checkLimit: boolean = false): Promise<any[]> => {
+  const processedWorkflow = JSON.parse(JSON.stringify(workflow));
+
+  processedWorkflow.forEach((pair: any) => {
+    pair.what.forEach((action: any) => {
+      // Handle limit validation for scrapeList action
+      if (action.action === 'scrapeList' && checkLimit && Array.isArray(action.args) && action.args.length > 0) {
+        const scrapeConfig = action.args[0];
+        if (scrapeConfig && typeof scrapeConfig === 'object' && 'limit' in scrapeConfig) {
+          if (typeof scrapeConfig.limit === 'number' && scrapeConfig.limit > 5) {
+            scrapeConfig.limit = 5;
+          }
+        }
+      }
+
+      // Handle decryption for type and press actions
+      if ((action.action === 'type' || action.action === 'press') && Array.isArray(action.args) && action.args.length > 1) {
+        try {
+          const encryptedValue = action.args[1];
+          if (typeof encryptedValue === 'string') {
+            const decryptedValue = decrypt(encryptedValue);
+            action.args[1] = decryptedValue;
+          } else {
+            logger.log('error', 'Encrypted value is not a string');
+            action.args[1] = '';
+          }
+        } catch (error: unknown) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          logger.log('error', `Failed to decrypt input value: ${errorMessage}`);
+          action.args[1] = '';
+        }
+      }
+    });
+  });
+
+  return processedWorkflow;
+}
+
+/**
+ * Logs information about recordings API.
+ */
+router.all('/', requireSignIn, (req, res, next) => {
+  logger.log('debug', `The recordings API was invoked: ${req.url}`)
+  next() // pass control to the next handler
+})
+
+/**
+ * GET endpoint for getting an array of all stored recordings.
+ */
+router.get('/recordings', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).send({ error: 'Unauthorized' });
+    }
+    const data = await Robot.findAll({ where: { userId: req.user.id } });
+    return res.send(data);
+  } catch (e) {
+    logger.log('info', 'Error while reading robots');
+    return res.send(null);
+  }
+});
+
+/**
+ * GET endpoint for getting a recording.
+ */
+router.get('/recordings/:id', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).send({ error: 'Unauthorized' });
+    }
+    const data = await Robot.findOne({
+      where: { 'recording_meta.id': req.params.id, userId: req.user.id },
+      raw: true
+    }
+    );
+
+    if (data?.recording?.workflow) {
+      data.recording.workflow = await processWorkflowActions(
+        data.recording.workflow,
+      );
+    }
+
+    return res.send(data);
+  } catch (e) {
+    logger.log('info', 'Error while reading robots');
+    return res.send(null);
+  }
+})
+
+router.get(('/recordings/:id/runs'), requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ statusCode: 401, messageCode: 'error', message: 'Unauthorized' });
+    }
+    // Verify robot belongs to calling user before returning its runs
+    const robot = await Robot.findOne({ where: { 'recording_meta.id': req.params.id, userId: req.user.id } });
+    if (!robot) {
+      return res.status(404).json({ statusCode: 404, messageCode: 'error', message: 'Robot not found' });
+    }
+    const runs = await Run.findAll({
+      where: {
+        robotMetaId: req.params.id
+      },
+      attributes: {
+        exclude: ['serializableOutput', 'binaryOutput']
+      },
+      raw: true
+    });
+    const formattedRuns = runs.map(formatRunResponse);
+    const response = {
+      statusCode: 200,
+      messageCode: "success",
+      runs: {
+        totalCount: formattedRuns.length,
+        items: formattedRuns,
+      },
+    };
+
+    res.status(200).json(response);
+  } catch (error) {
+    console.error("Error fetching runs:", error);
+    res.status(500).json({
+      statusCode: 500,
+      messageCode: "error",
+      message: "Failed to retrieve runs",
+    });
+  }
+})
+
+function formatRunResponse(run: any) {
+  const formattedRun = {
+    id: run.id,
+    status: run.status,
+    name: run.name,
+    robotId: run.robotMetaId, // Renaming robotMetaId to robotId
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    runId: run.runId,
+    runByUserId: run.runByUserId,
+    runByScheduleId: run.runByScheduleId,
+    runByAPI: run.runByAPI,
+    data: {},
+    screenshot: null,
+  };
+
+  if (run.serializableOutput && run.serializableOutput['item-0']) {
+    formattedRun.data = run.serializableOutput['item-0'];
+  } else if (run.binaryOutput && run.binaryOutput['item-0']) {
+    formattedRun.screenshot = run.binaryOutput['item-0'];
+  }
+
+  return formattedRun;
+}
+
+interface CredentialInfo {
+  value: string;
+  type: string;
+}
+
+interface Credentials {
+  [key: string]: CredentialInfo;
+}
+
+function handleWorkflowActions(workflow: any[], credentials: Credentials) {
+  return workflow.map(step => {
+    if (!step.what) return step;
+
+    const newWhat: any[] = [];
+    const processedSelectors = new Set<string>();
+
+    for (let i = 0; i < step.what.length; i++) {
+      const action = step.what[i];
+
+      if (!action?.action || !action?.args?.[0]) {
+        newWhat.push(action);
+        continue;
+      }
+
+      const selector = action.args[0];
+      const credential = credentials[selector];
+
+      if (!credential) {
+        newWhat.push(action);
+        continue;
+      }
+
+      if (action.action === 'click') {
+        newWhat.push(action);
+
+        if (!processedSelectors.has(selector) &&
+          i + 1 < step.what.length &&
+          (step.what[i + 1].action === 'type' || step.what[i + 1].action === 'press')) {
+
+          newWhat.push({
+            action: 'type',
+            args: [selector, encrypt(credential.value), credential.type]
+          });
+
+          newWhat.push({
+            action: 'waitForLoadState',
+            args: ['networkidle']
+          });
+
+          processedSelectors.add(selector);
+
+          while (i + 1 < step.what.length &&
+            (step.what[i + 1].action === 'type' ||
+              step.what[i + 1].action === 'press' ||
+              step.what[i + 1].action === 'waitForLoadState')) {
+            i++;
+          }
+        }
+      } else if ((action.action === 'type' || action.action === 'press') &&
+        !processedSelectors.has(selector)) {
+        newWhat.push({
+          action: 'type',
+          args: [selector, encrypt(credential.value), credential.type]
+        });
+
+        newWhat.push({
+          action: 'waitForLoadState',
+          args: ['networkidle']
+        });
+
+        processedSelectors.add(selector);
+
+        // Skip subsequent type/press/waitForLoadState actions for this selector
+        while (i + 1 < step.what.length &&
+          (step.what[i + 1].action === 'type' ||
+            step.what[i + 1].action === 'press' ||
+            step.what[i + 1].action === 'waitForLoadState')) {
+          i++;
+        }
+      }
+    }
+
+    return {
+      ...step,
+      what: newWhat
+    };
+  });
+}
+
+/**
+ * PUT endpoint to update the name and limit of a robot.
+ */
+router.put('/recordings/:id', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { id } = req.params;
+    const { name, limits, credentials, targetUrl, workflow: incomingWorkflow, formats } = req.body;
+
+    if (!name && !limits && !credentials && !targetUrl && !incomingWorkflow && formats === undefined) {
+      return res.status(400).json({ error: 'Either "name", "limits", "credentials", "target_url", "workflow" or "formats" must be provided.' });
+    }
+
+    const robot = await Robot.findOne({ where: { 'recording_meta.id': id, userId: req.user!.id } });
+    if (!robot) {
+      return res.status(404).json({ error: 'Robot not found.' });
+    }
+
+    let workflow: any[] = Array.isArray(incomingWorkflow)
+      ? JSON.parse(JSON.stringify(incomingWorkflow))
+      : (Array.isArray(robot.recording?.workflow) ? [...robot.recording.workflow] : []);
+
+    if (targetUrl) {
+      if (robot.recording_meta?.type === 'scrape') {
+        workflow = workflow.map((step: any) => {
+          const updatedWhere = step.where?.url && step.where.url !== 'about:blank'
+            ? { ...step.where, url: normalizeRobotUrl(targetUrl) }
+            : step.where;
+
+          const updatedWhat = (step.what || []).map((action: any) => {
+            if (action.action === 'goto' && action.args?.length) {
+              return { ...action, args: [normalizeRobotUrl(targetUrl), ...action.args.slice(1)] };
+            }
+            if (action.action === 'scrape' && action.args?.[0] && typeof action.args[0] === 'object') {
+              return { ...action, args: [{ ...action.args[0], url: normalizeRobotUrl(targetUrl) }, ...action.args.slice(1)] };
+            }
+            return action;
+          });
+
+          return { ...step, where: updatedWhere, what: updatedWhat };
+        });
+      } else {
+        const entryStep = [...workflow].reverse().find((s: any) => s.where?.url === 'about:blank');
+        const originalEntryUrl: string | null = entryStep?.what?.find(
+          (action: any) => action.action === 'goto' && action.args?.length
+        )?.args?.[0] ?? null;
+
+        let gotoUpdated = false;
+        let whereUpdateStopped = false;
+
+        workflow = [...workflow].reverse().map((step: any) => {
+          let updatedWhere = step.where;
+          if (originalEntryUrl && step.where?.url !== 'about:blank' && !whereUpdateStopped) {
+            if (step.where?.url === originalEntryUrl) {
+              updatedWhere = { ...step.where, url: normalizeRobotUrl(targetUrl) };
+            } else {
+              whereUpdateStopped = true;
+            }
+          }
+
+          const updatedWhat = (step.what || []).map((action: any) => {
+            if (!gotoUpdated && action.action === 'goto' && action.args?.[0] === originalEntryUrl) {
+              gotoUpdated = true;
+              return { ...action, args: [normalizeRobotUrl(targetUrl), ...action.args.slice(1)] };
+            }
+            if ((action.action === 'scrape' || action.action === 'crawl') &&
+                action.args?.[0] && typeof action.args[0] === 'object' &&
+                action.args[0].url === originalEntryUrl) {
+              return { ...action, args: [{ ...action.args[0], url: normalizeRobotUrl(targetUrl) }, ...action.args.slice(1)] };
+            }
+            return action;
+          });
+
+          return { ...step, where: updatedWhere, what: updatedWhat };
+        }).reverse();
+      }
+    }
+
+    if (credentials) {
+      workflow = handleWorkflowActions(workflow, credentials);
+    }
+
+    if (limits && Array.isArray(limits) && limits.length > 0) {
+      for (const limitInfo of limits) {
+        const { pairIndex, actionIndex, argIndex, limit } = limitInfo;
+
+        const pair = workflow[pairIndex];
+        if (!pair || !pair.what) continue;
+
+        const action = pair.what[actionIndex];
+        if (!action || !action.args) continue;
+
+        const arg = action.args[argIndex];
+        if (!arg || typeof arg !== 'object') continue;
+
+        (arg as { limit: number }).limit = limit;
+      }
+    }
+
+    let normalizedFormats: OutputFormats[] | undefined;
+    
+    let searchMode: string | undefined;
+    if (robot.recording_meta?.type === 'search') {
+      const searchAction = workflow
+        .flatMap((pair: any) => pair.what || [])
+        .find((action: any) => action?.action === 'search');
+      searchMode = searchAction?.args?.[0]?.mode;
+    }
+
+    if (formats !== undefined || (robot.recording_meta?.type === 'search' && searchMode === 'discover')) {
+      let allowedFormats: readonly OutputFormats[] | undefined;
+      if (robot.recording_meta?.type === 'scrape') {
+        allowedFormats = SCRAPE_OUTPUT_FORMAT_OPTIONS;
+      } else if (robot.recording_meta?.type === 'search' && searchMode === 'scrape') {
+        allowedFormats = SEARCH_SCRAPE_OUTPUT_FORMAT_OPTIONS;
+      }
+
+      const { validFormats, invalidFormats } = parseOutputFormats(formats, allowedFormats);
+
+      if (invalidFormats.length > 0) {
+        return res.status(400).json({
+          error: `Invalid formats: ${invalidFormats.map(String).join(', ')}`,
+        });
+      }
+
+      if (robot.recording_meta?.type === 'crawl') {
+        normalizedFormats = validFormats.length > 0 ? validFormats : [...DEFAULT_OUTPUT_FORMATS];
+      } else if (robot.recording_meta?.type === 'scrape') {
+        normalizedFormats = validFormats.length > 0 ? validFormats : [...DEFAULT_OUTPUT_FORMATS];
+      } else if (robot.recording_meta?.type === 'search') {
+        if (searchMode === 'discover') {
+          normalizedFormats = [];
+        } else {
+          normalizedFormats = validFormats.length > 0 ? validFormats : [...DEFAULT_OUTPUT_FORMATS];
+        }
+      } else {
+        normalizedFormats = validFormats;
+      }
+    }
+
+    let trimmedName: string | undefined;
+    if (name !== undefined) {
+      if (typeof name !== 'string') {
+        return res.status(400).json({ error: 'Robot name must be a string.' });
+      }
+      trimmedName = name.trim();
+      if (!trimmedName) {
+        return res.status(400).json({ error: 'Robot name cannot be empty.' });
+      }
+      if (trimmedName.toLowerCase() !== robot.recording_meta.name.trim().toLowerCase()) {
+        const nameTaken = await isRobotNameTaken(trimmedName, robot.userId as number, id);
+        if (nameTaken) {
+          return res.status(409).json({ error: `A robot with the name "${trimmedName}" already exists.` });
+        }
+      }
+    }
+
+    let updatedMeta = { ...robot.recording_meta };
+    if (trimmedName) updatedMeta.name = trimmedName;
+    if (targetUrl) updatedMeta.url = normalizeRobotUrl(targetUrl);
+    if (normalizedFormats !== undefined) updatedMeta.formats = normalizedFormats;
+
+    const updates: any = {
+      recording: { ...robot.recording, workflow: normalizeWorkflowUrls(workflow) },
+      recording_meta: updatedMeta,
+    };
+
+    await Robot.update(updates, {
+      where: { 'recording_meta.id': id, userId: req.user!.id }
+    });
+
+    logger.log('info', `Robot with ID ${id} was updated successfully.`);
+
+    return res.status(200).json({ message: 'Robot updated successfully', robot });
+  } catch (error: any) {
+    if (error.name === 'SequelizeUniqueConstraintError' || error.parent?.code === '23505') {
+      return res.status(409).json({ error: 'A robot with this name already exists.' });
+    }
+    // Safely handle the error type
+    if (error instanceof Error) {
+      logger.log('error', `Error updating robot with ID ${req.params.id}: ${error.message}`);
+      return res.status(500).json({ error: error.message });
+    } else {
+      logger.log('error', `Unknown error updating robot with ID ${req.params.id}`);
+      return res.status(500).json({ error: 'An unknown error occurred.' });
+    }
+  }
+});
+
+/**
+ * POST endpoint for creating a markdown robot
+ */
+router.post('/recordings/scrape', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { url, name, formats, promptInstructions, promptLlmProvider, promptLlmModel, promptLlmApiKey, promptLlmBaseUrl } = req.body;
+
+    if (!url) {
+      return res.status(400).json({ error: 'The "url" field is required.' });
+    }
+
+    if (!req.user) {
+      return res.status(401).send({ error: 'Unauthorized' });
+    }
+
+    let normalizedUrl: string;
+    try {
+      normalizedUrl = normalizeRobotUrl(url);
+    } catch (err) {
+      return res.status(400).json({ error: 'Invalid URL format' });
+    }
+
+    const { validFormats: scrapeFormats, invalidFormats } = parseOutputFormats(
+      formats,
+      SCRAPE_OUTPUT_FORMAT_OPTIONS
+    );
+
+    if (invalidFormats.length > 0) {
+      return res.status(400).json({
+        error: `Invalid formats: ${invalidFormats.map(String).join(', ')}`,
+      });
+    }
+
+    const finalFormats = scrapeFormats.length > 0 ? scrapeFormats : DEFAULT_OUTPUT_FORMATS;
+
+    const robotName = (typeof name === 'string' ? name.trim() : '') || `Markdown Robot - ${new URL(normalizedUrl).hostname}`;
+    if (!robotName) {
+      return res.status(400).json({ error: 'Robot name cannot be empty.' });
+    }
+
+    if (await isRobotNameTaken(robotName, req.user.id)) {
+      return res.status(409).json({ error: `A robot with the name "${robotName}" already exists.` });
+    }
+
+    if (scrapeFormats.length === 0 && formats !== undefined) {
+      return res.status(400).json({ error: 'At least one output format must be selected.' });
+    }
+
+    const currentTimestamp = new Date().toLocaleString();
+    const robotId = uuid();
+
+    const newRobot = await Robot.create({
+      id: uuid(),
+      userId: req.user.id,
+      recording_meta: {
+        name: robotName,
+        id: robotId,
+        createdAt: currentTimestamp,
+        updatedAt: currentTimestamp,
+        pairs: 0,
+        params: [],
+        type: 'scrape',
+        url: normalizedUrl,
+        formats: finalFormats,
+        ...(promptInstructions ? { promptInstructions: String(promptInstructions).substring(0, 1000) } : {}),
+        ...(promptLlmProvider ? { promptLlmProvider } : {}),
+        ...(promptLlmModel ? { promptLlmModel } : {}),
+        ...(promptLlmApiKey ? { promptLlmApiKey } : {}),
+        ...(promptLlmBaseUrl ? { promptLlmBaseUrl } : {}),
+      },
+      recording: { workflow: [] },
+      google_sheet_email: null,
+      google_sheet_name: null,
+      google_sheet_id: null,
+      google_access_token: null,
+      google_refresh_token: null,
+      schedule: null,
+    });
+
+    logger.log('info', `Markdown robot created with id: ${newRobot.id}`);
+    capture(
+      'maxun-oss-robot-created',
+      {
+        robot_meta: newRobot.recording_meta,
+        recording: newRobot.recording,
+      }
+    )
+
+    return res.status(201).json({
+      message: 'Markdown robot created successfully.',
+      robot: newRobot,
+    });
+  } catch (error: any) {
+    if (error.name === 'SequelizeUniqueConstraintError' || error.parent?.code === '23505') {
+      return res.status(409).json({ error: 'A robot with this name already exists.' });
+    }
+    if (error instanceof Error) {
+      logger.log('error', `Error creating markdown robot: ${error.message}`);
+      return res.status(500).json({ error: error.message });
+    } else {
+      logger.log('error', 'Unknown error creating markdown robot');
+      return res.status(500).json({ error: 'An unknown error occurred.' });
+    }
+  }
+});
+
+/**
+ * POST endpoint for creating an LLM-powered extraction robot
+ * URL is optional - if not provided, the system will search for the target website based on the prompt
+ */
+router.post('/recordings/llm', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { url, prompt, llmProvider, llmModel, llmApiKey, llmBaseUrl, robotName } = req.body;
+
+    if (!prompt) {
+      return res.status(400).json({ error: 'The "prompt" field is required.' });
+    }
+
+    const trimmedPrompt = (prompt as string).trim();
+    if (trimmedPrompt.length < 15) {
+      return res.status(400).json({ error: 'Extraction prompt is too short. Please describe what you want to extract (e.g., "Extract company names and descriptions from the YC companies page").' });
+    }
+    if (/field_\d+/i.test(trimmedPrompt)) {
+      return res.status(400).json({ error: 'Extraction prompt looks like a template placeholder. Please replace it with a specific description of what you want to extract.' });
+    }
+
+    if (!req.user) {
+      return res.status(401).send({ error: 'Unauthorized' });
+    }
+
+    // Validate URL format if provided
+    if (url) {
+      try {
+        normalizeRobotUrl(url);
+      } catch (err) {
+        return res.status(400).json({ error: 'Invalid URL format' });
+      }
+    }
+
+    const finalRobotName = (typeof robotName === 'string' ? robotName.trim() : '') || `LLM Extract: ${prompt.substring(0, 50)}`;
+    if (!finalRobotName) {
+      return res.status(400).json({ error: 'Robot name cannot be empty.' });
+    }
+
+    if (await isRobotNameTaken(finalRobotName, req.user.id)) {
+      return res.status(409).json({ error: `A robot with the name "${finalRobotName}" already exists.` });
+    }
+
+    const llmConfig = {
+      provider: llmProvider || 'ollama',
+      model: llmModel,
+      apiKey: llmApiKey,
+      baseUrl: llmBaseUrl
+    };
+
+    const robotId = uuid();
+    const currentTimestamp = new Date().toISOString();
+
+    const stubRobot = await Robot.create({
+      id: uuid(),
+      userId: req.user.id,
+      recording_meta: {
+        name: finalRobotName,
+        id: robotId,
+        createdAt: currentTimestamp,
+        updatedAt: currentTimestamp,
+        pairs: 0,
+        params: [],
+        type: 'extract',
+        url: url || '',
+        isLLM: true,
+        status: 'creating',
+      },
+      recording: { workflow: [] },
+      google_sheet_email: null,
+      google_sheet_name: null,
+      google_sheet_id: null,
+      google_access_token: null,
+      google_refresh_token: null,
+      schedule: null,
+    });
+
+    logger.log('info', `LLM robot stub created with id: ${stubRobot.id}, starting workflow generation`);
+
+    let workflowResult: any;
+    let finalUrl: string;
+
+    try {
+      if (url) {
+        logger.log('info', `Starting LLM workflow generation for provided URL: ${url}`);
+        workflowResult = await WorkflowEnricher.generateWorkflowFromPrompt(url, prompt, req.user.id, llmConfig);
+        finalUrl = workflowResult.url || url;
+      } else if (await WorkflowEnricher.isMultiSitePrompt(prompt, llmConfig)) {
+        logger.log('info', `Auto-detected multi-site prompt, starting multi-site workflow generation: "${prompt}"`);
+        workflowResult = await WorkflowEnricher.generateMultiSiteWorkflowFromSearch(prompt, req.user.id, llmConfig);
+        finalUrl = workflowResult.url || '';
+        if (finalUrl) {
+          logger.log('info', `Multi-site workflow primary URL: ${finalUrl}`);
+        }
+      } else {
+        logger.log('info', `Starting LLM workflow generation with automatic URL detection for prompt: "${prompt}"`);
+        workflowResult = await WorkflowEnricher.generateWorkflowFromPromptWithSearch(prompt, req.user.id, llmConfig);
+        finalUrl = workflowResult.url || '';
+        if (finalUrl) {
+          logger.log('info', `Auto-detected URL: ${finalUrl}`);
+        }
+      }
+
+      if (finalUrl) {
+        finalUrl = normalizeRobotUrl(finalUrl);
+      }
+
+      if (!workflowResult.success || !workflowResult.workflow) {
+        logger.log('error', `Failed to generate workflow: ${JSON.stringify(workflowResult.errors)}`);
+        await stubRobot.destroy();
+        return res.status(400).json({
+          error: 'Failed to generate workflow from prompt',
+          details: workflowResult.errors
+        });
+      }
+
+      const normalizedWorkflow = normalizeWorkflowUrls(workflowResult.workflow);
+
+      await stubRobot.update({
+        recording_meta: {
+          ...stubRobot.recording_meta,
+          pairs: normalizedWorkflow.length,
+          url: finalUrl,
+          updatedAt: new Date().toISOString(),
+          status: 'ready',
+        },
+        recording: { workflow: normalizedWorkflow },
+      });
+
+      await stubRobot.reload();
+
+      logger.log('info', `LLM robot ready with id: ${stubRobot.id}`);
+      capture('maxun-oss-llm-robot-created', {
+        robot_meta: stubRobot.recording_meta,
+        recording: stubRobot.recording,
+        llm_provider: llmProvider || 'ollama',
+        prompt: prompt,
+        urlAutoDetected: !url,
+      });
+
+      return res.status(201).json({
+        message: 'LLM robot created successfully.',
+        robot: stubRobot,
+      });
+    } catch (llmError) {
+      try { await stubRobot.destroy(); } catch (_) {}
+      throw llmError;
+    }
+  } catch (error: any) {
+    if (error.name === 'SequelizeUniqueConstraintError' || error.parent?.code === '23505') {
+      return res.status(409).json({ error: 'A robot with this name already exists.' });
+    }
+    if (error instanceof Error) {
+      logger.log('error', `Error creating LLM robot: ${error.message}`);
+      return res.status(500).json({ error: error.message });
+    } else {
+      logger.log('error', 'Unknown error creating LLM robot');
+      return res.status(500).json({ error: 'An unknown error occurred.' });
+    }
+  }
+});
+
+/**
+ * DELETE endpoint for deleting a recording from the storage.
+ */
+router.delete('/recordings/:id', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  if (!req.user) {
+    return res.status(401).send({ error: 'Unauthorized' });
+  }
+  try {
+    await Robot.destroy({
+      where: { 'recording_meta.id': req.params.id, userId: req.user.id }
+    });
+    capture(
+      'maxun-oss-robot-deleted',
+      {
+        robotId: req.params.id,
+        user_id: req.user?.id,
+        deleted_at: new Date().toISOString(),
+      }
+    )
+    return res.send(true);
+  } catch (e) {
+    const { message } = e as Error;
+    logger.log('info', `Error while deleting a recording with name: ${req.params.fileName}.json`);
+    return res.send(false);
+  }
+});
+
+/**
+ * POST endpoint to duplicate a robot with a new target URL.
+ */
+router.post('/recordings/:id/duplicate', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { id } = req.params;
+    const { targetUrl, newName } = req.body;
+
+    if (!targetUrl) {
+      return res.status(400).json({ error: 'The "targetUrl" field is required.' });
+    }
+
+    let normalizedTargetUrl: string;
+    try {
+      normalizedTargetUrl = normalizeRobotUrl(targetUrl);
+      const parsed = new URL(normalizedTargetUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        return res.status(400).json({ error: 'The "targetUrl" must use http or https protocol.' });
+      }
+    } catch {
+      return res.status(400).json({ error: 'The "targetUrl" must be a valid URL.' });
+    }
+
+    const originalRobot = await Robot.findOne({
+      where: { 'recording_meta.id': id, userId: req.user!.id },
+    });
+
+    if (!originalRobot) {
+      return res.status(404).json({ error: 'Original robot not found.' });
+    }
+
+    const lastWord = targetUrl.split('/').filter(Boolean).pop() || 'Unnamed';
+    const duplicateName = (newName?.trim() || `${originalRobot.recording_meta.name} (${lastWord})`).trim();
+
+    if (await isRobotNameTaken(duplicateName, originalRobot.userId as number)) {
+      return res.status(409).json({ error: `A robot with the name "${duplicateName}" already exists.` });
+    }
+
+    const steps: any[] = originalRobot.recording.workflow;
+    const entryStep = steps.findLast((step: any) => step.where?.url === 'about:blank');
+    const originalEntryUrl: string | null = entryStep?.what?.find(
+      (action: any) => action.action === 'goto' && action.args?.length
+    )?.args?.[0] ?? null;
+
+    let gotoUpdated = false;
+    let whereUpdateStopped = false;
+
+    const workflow = [...steps].reverse().map((step: any) => {
+      let updatedWhere = step.where;
+
+      if (originalEntryUrl && step.where?.url !== 'about:blank' && !whereUpdateStopped) {
+        if (step.where?.url === originalEntryUrl) {
+          updatedWhere = { ...step.where, url: normalizedTargetUrl };
+        } else {
+          whereUpdateStopped = true;
+        }
+      }
+
+      const updatedWhat = step.what.map((action: any) => {
+        if (!gotoUpdated && action.action === 'goto' && action.args?.[0] === originalEntryUrl) {
+          gotoUpdated = true;
+          return { ...action, args: [normalizeRobotUrl(targetUrl), ...action.args.slice(1)] };
+        }
+        if ((action.action === 'scrape' || action.action === 'crawl') &&
+            action.args?.[0] && typeof action.args[0] === 'object' &&
+            action.args[0].url === originalEntryUrl) {
+          return { ...action, args: [{ ...action.args[0], url: normalizeRobotUrl(targetUrl) }, ...action.args.slice(1)] };
+        }
+        return action;
+      });
+
+      return { ...step, where: updatedWhere, what: updatedWhat };
+    }).reverse();
+
+    const currentTimestamp = new Date().toLocaleString();
+
+    const newRobot = await Robot.create({
+      id: uuid(),
+      userId: originalRobot.userId,
+      recording_meta: {
+        ...originalRobot.recording_meta,
+        id: uuid(),
+        name: duplicateName,
+        url: normalizedTargetUrl,
+        createdAt: currentTimestamp,
+        updatedAt: currentTimestamp,
+      },
+      recording: { ...originalRobot.recording, workflow },
+      google_sheet_email: null,
+      google_sheet_name: null,
+      google_sheet_id: null,
+      google_access_token: null,
+      google_refresh_token: null,
+      airtable_base_id: null,
+      airtable_base_name: null,
+      airtable_table_name: null,
+      airtable_table_id: null,
+      airtable_access_token: null,
+      airtable_refresh_token: null,
+      webhooks: null,
+      schedule: null,
+    });
+
+    logger.log('info', `Robot with ID ${id} duplicated successfully as ${newRobot.id}.`);
+
+    return res.status(201).json({
+      message: 'Robot duplicated and target URL updated successfully.',
+      robot: newRobot,
+    });
+  } catch (error) {
+    if (error instanceof Error) {
+      logger.log('error', `Error duplicating robot with ID ${req.params.id}: ${error.message}`);
+      return res.status(500).json({ error: error.message });
+    } else {
+      logger.log('error', `Unknown error duplicating robot with ID ${req.params.id}`);
+      return res.status(500).json({ error: 'An unknown error occurred.' });
+    }
+  }
+});
+
+/**
+ * GET endpoint for getting an array of runs from the storage.
+ */
+router.get('/runs', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).send({ error: 'Unauthorized' });
+    }
+    const userRobotIds = (
+      await Robot.findAll({ where: { userId: req.user.id }, attributes: ['id'], raw: true })
+    ).map((r) => r.id);
+
+    const data = await Run.findAll({
+      where: { robotId: { [Op.in]: userRobotIds } },
+      attributes: {
+        exclude: ['serializableOutput', 'binaryOutput']
+      }
+    });
+    return res.send(data);
+  } catch (e) {
+    logger.log('info', 'Error while reading runs');
+    return res.send(null);
+  }
+});
+
+/**
+ * DELETE endpoint for deleting a run from the storage.
+ */
+router.delete('/runs/:id', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  if (!req.user) {
+    return res.status(401).send({ error: 'Unauthorized' });
+  }
+  try {
+    const run = await Run.findOne({ where: { runId: req.params.id } });
+    if (!run) {
+      return res.send(true); // Already gone — idempotent
+    }
+    const robot = await Robot.findOne({ where: { 'recording_meta.id': run.robotMetaId, userId: req.user.id } });
+    if (!robot) {
+      return res.status(404).send({ error: 'Run not found' });
+    }
+    await Run.destroy({ where: { runId: req.params.id } });
+    capture(
+      'maxun-oss-run-deleted',
+      {
+        runId: req.params.id,
+        user_id: req.user?.id,
+        deleted_at: new Date().toISOString(),
+      }
+    )
+    return res.send(true);
+  } catch (e) {
+    const { message } = e as Error;
+    logger.log('info', `Error while deleting a run with name: ${req.params.fileName}.json`);
+    return res.send(false);
+  }
+});
+
+/**
+ * PUT endpoint for starting a remote browser instance and saving run metadata to the storage.
+ * Making it ready for interpretation and returning a runId.
+ * 
+ * If the user has reached their browser limit, the run will be queued.
+ */
+router.put('/runs/:id', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const recording = await Robot.findOne({
+      where: {
+        'recording_meta.id': req.params.id,
+        userId: req.user.id,
+      },
+      raw: true
+    });
+
+    if (!recording || !recording.recording_meta || !recording.recording_meta.id) {
+      return res.status(404).send({ error: 'Recording not found' });
+    }
+
+    // Generate runId first
+    const runId = uuid();
+    
+    const canCreateBrowser = await browserPool.hasAvailableBrowserSlots(req.user.id, "run");
+
+    if (canCreateBrowser) {
+      let browserId: string;
+      
+      try {
+        browserId = await createRemoteBrowserForRun(req.user.id);
+        
+        if (!browserId || browserId.trim() === '') {
+          throw new Error('Failed to generate valid browser ID');
+        }
+        
+        logger.log('info', `Created browser ${browserId} for run ${runId}`);
+        
+      } catch (browserError: any) {
+        logger.log('error', `Failed to create browser: ${browserError.message}`);
+        return res.status(500).send({ error: 'Failed to create browser instance' });
+      }
+
+      try {
+        await Run.create({
+          status: 'running',
+          name: recording.recording_meta.name,
+          robotId: recording.id,
+          robotMetaId: recording.recording_meta.id,
+          startedAt: new Date().toLocaleString(),
+          finishedAt: '',
+          browserId: browserId, 
+          interpreterSettings: req.body,
+          log: '',
+          runId,
+          runByUserId: req.user.id,
+          serializableOutput: {},
+          binaryOutput: {},
+        });
+
+        logger.log('info', `Created run ${runId} with browser ${browserId}`);
+
+      } catch (dbError: any) {
+        logger.log('error', `Database error creating run: ${dbError.message}`);
+        
+        try {
+          await destroyRemoteBrowser(browserId, req.user.id);
+        } catch (cleanupError: any) {
+          logger.log('warn', `Failed to cleanup browser after run creation failure: ${cleanupError.message}`);
+        }
+        
+        return res.status(500).send({ error: 'Failed to create run record' });
+      }
+
+      try {
+        const jobId = await addJob(QUEUE_NAMES.EXECUTE_RUN, {
+          userId: req.user.id,
+          runId: runId,
+          browserId: browserId,
+        }, { maxAttempts: 1 });
+
+        logger.log('info', `Queued run execution job with ID: ${jobId} for run: ${runId}`);
+      } catch (queueError: any) {
+        logger.log('error', `Failed to queue run execution: ${queueError.message}`);
+        
+        try {
+          await Run.update({
+            status: 'failed',
+            finishedAt: new Date().toLocaleString(),
+            log: 'Failed to queue execution job'
+          }, { where: { runId: runId } });
+          
+          await destroyRemoteBrowser(browserId, req.user.id);
+        } catch (cleanupError: any) {
+          logger.log('warn', `Failed to cleanup after queue error: ${cleanupError.message}`);
+        }
+
+        return res.status(503).send({ error: 'Unable to queue run, please try again later' });
+      }
+
+      return res.send({
+        browserId: browserId, 
+        runId: runId,
+        robotMetaId: recording.recording_meta.id,
+        queued: false 
+      }); 
+    } else {
+      const browserId = uuid(); 
+
+      await Run.create({
+        status: 'queued',
+        name: recording.recording_meta.name,
+        robotId: recording.id,
+        robotMetaId: recording.recording_meta.id,
+        startedAt: new Date().toLocaleString(),
+        finishedAt: '',
+        browserId,
+        interpreterSettings: req.body,
+        log: 'Run queued - waiting for available browser slot',
+        runId,
+        runByUserId: req.user.id,
+        serializableOutput: {},
+        binaryOutput: {},
+      });
+      
+      return res.send({
+        browserId: browserId,
+        runId: runId,
+        robotMetaId: recording.recording_meta.id,
+        queued: true 
+      });
+    } 
+  } catch (e) {
+    const { message } = e as Error;
+    logger.log('error', `Error while creating a run with robot id: ${req.params.id} - ${message}`);    
+    return res.status(500).send({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET endpoint for getting a run from the storage.
+ */
+router.get('/runs/run/:id', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).send({ error: 'Unauthorized' });
+    }
+    const run = await Run.findOne({ where: { runId: req.params.id }, raw: true });
+    if (!run) {
+      return res.status(404).send(null);
+    }
+    const robot = await Robot.findOne({ where: { 'recording_meta.id': run.robotMetaId, userId: req.user.id } });
+    if (!robot) {
+      return res.status(404).send(null);
+    }
+    return res.send(run);
+  } catch (e) {
+    const { message } = e as Error;
+    logger.log('error', `Error ${message} while reading a run with id: ${req.params.id}.json`);
+    return res.send(null);
+  }
+});
+
+function AddGeneratedFlags(workflow: WorkflowFile) {
+  const copy = JSON.parse(JSON.stringify(workflow));
+  for (let i = 0; i < workflow.workflow.length; i++) {
+    copy.workflow[i].what.unshift({
+      action: 'flag',
+      args: ['generated'],
+    });
+  }
+  return copy;
+};
+
+/**
+ * PUT endpoint for finishing a run and saving it to the storage.
+ */
+router.post('/runs/run/:id', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) { return res.status(401).send({ error: 'Unauthorized' }); }
+
+    const run = await Run.findOne({ where: { runId: req.params.id } });
+    if (!run) {
+      return res.status(404).send(false);
+    }
+
+    const plainRun = run.toJSON();
+
+    const recording = await Robot.findOne({ where: { 'recording_meta.id': plainRun.robotMetaId, userId: req.user.id }, raw: true });
+    if (!recording) {
+      return res.status(404).send(false);
+    }
+
+    try {
+      const jobId = await addJob(QUEUE_NAMES.EXECUTE_RUN, {
+        userId: req.user.id,
+        runId: req.params.id,
+        browserId: plainRun.browserId,
+      }, { maxAttempts: 1 });
+
+      logger.log('info', `Queued run execution job with ID: ${jobId} for run: ${req.params.id}`);
+    } catch (queueError: any) {
+      logger.log('error', `Failed to queue run execution`);
+
+    }
+  } catch (e) {
+    const { message } = e as Error;
+    // If error occurs, set run status to failed
+    const run = await Run.findOne({ where: { runId: req.params.id } });
+    if (run) {
+      await run.update({
+        status: 'failed',
+        finishedAt: new Date().toLocaleString(),
+      });
+    }
+    logger.log('info', `Error while running a robot with id: ${req.params.id} - ${message}`);
+    capture(
+      'maxun-oss-run-created',
+      {
+        runId: req.params.id,
+        user_id: req.user?.id,
+        created_at: new Date().toISOString(),
+        status: 'failed',
+        error_message: message,
+        source: 'manual'
+      }
+    );
+    return res.send(false);
+  }
+});
+
+router.put('/schedule/:id/', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { id } = req.params;
+    const { runEvery, runEveryUnit, startFrom, dayOfMonth, atTimeStart, atTimeEnd, timezone } = req.body;
+
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const robot = await Robot.findOne({ where: { 'recording_meta.id': id, userId: req.user.id } });
+    if (!robot) {
+      return res.status(404).json({ error: 'Robot not found' });
+    }
+
+    // Validate required parameters
+    if (!runEvery || !runEveryUnit || !startFrom || !atTimeStart || !atTimeEnd || !timezone) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+
+    // Validate time zone
+    if (!moment.tz.zone(timezone)) {
+      return res.status(400).json({ error: 'Invalid timezone' });
+    }
+
+    // Validate and parse start and end times
+    const [startHours, startMinutes] = atTimeStart.split(':').map(Number);
+    const [endHours, endMinutes] = atTimeEnd.split(':').map(Number);
+
+    if (isNaN(startHours) || isNaN(startMinutes) || isNaN(endHours) || isNaN(endMinutes) ||
+      startHours < 0 || startHours > 23 || startMinutes < 0 || startMinutes > 59 ||
+      endHours < 0 || endHours > 23 || endMinutes < 0 || endMinutes > 59) {
+      return res.status(400).json({ error: 'Invalid time format' });
+    }
+
+    const days = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
+    if (!days.includes(startFrom)) {
+      return res.status(400).json({ error: 'Invalid start day' });
+    }
+
+    // Build cron expression based on run frequency and starting day
+    let cronExpression;
+    const dayIndex = days.indexOf(startFrom);
+
+    switch (runEveryUnit) {
+      case 'MINUTES':
+        cronExpression = `*/${runEvery} * * * *`;
+        break;
+      case 'HOURS':
+        cronExpression = `${startMinutes} */${runEvery} * * *`;
+        break;
+      case 'DAYS':
+        cronExpression = `${startMinutes} ${startHours} */${runEvery} * *`;
+        break;
+      case 'WEEKS':
+        cronExpression = `${startMinutes} ${startHours} * * ${dayIndex}`;
+        break;
+      case 'MONTHS':
+        // todo: handle leap year
+        cronExpression = `${startMinutes} ${startHours} ${dayOfMonth} */${runEvery} *`;
+        if (startFrom !== 'SUNDAY') {
+          cronExpression += ` ${dayIndex}`;
+        }
+        break;
+      default:
+        return res.status(400).json({ error: 'Invalid runEveryUnit' });
+    }
+
+    // Validate cron expression
+    if (!cronExpression || !cron.validate(cronExpression)) {
+      return res.status(400).json({ error: 'Invalid cron expression generated' });
+    }
+
+    try {
+      await cancelScheduledWorkflow(id);
+    } catch (cancelError) {
+      logger.log('warn', `Failed to cancel existing schedule for robot ${id}: ${cancelError}`);
+    }
+
+    await scheduleWorkflow(id, req.user.id, cronExpression, timezone);
+
+    const nextRunAt = computeNextRun(cronExpression, timezone);
+
+    await robot.update({
+      schedule: {
+        runEvery,
+        runEveryUnit,
+        startFrom,
+        dayOfMonth,
+        atTimeStart,
+        atTimeEnd,
+        timezone,
+        cronExpression,
+        lastRunAt: undefined,
+        nextRunAt: nextRunAt || undefined,
+      },
+    });
+
+    capture(
+      'maxun-oss-robot-scheduled',
+      {
+        robotId: id,
+        user_id: req.user.id,
+        scheduled_at: new Date().toISOString(),
+      }
+    )
+
+    // Fetch updated schedule details after setting it
+    const updatedRobot = await Robot.findOne({ where: { 'recording_meta.id': id, userId: req.user.id } });
+
+    res.status(200).json({
+      message: 'success',
+      robot: updatedRobot,
+    });
+  } catch (error) {
+    console.error('Error scheduling workflow:', error);
+    res.status(500).json({ error: 'Failed to schedule workflow' });
+  }
+});
+
+
+// Endpoint to get schedule details
+router.get('/schedule/:id', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const robot = await Robot.findOne({ where: { 'recording_meta.id': req.params.id, userId: req.user.id }, raw: true });
+
+    if (!robot) {
+      return res.status(404).json({ error: 'Robot not found' });
+    }
+
+    return res.status(200).json({
+      schedule: robot.schedule
+    });
+
+  } catch (error) {
+    console.error('Error getting schedule:', error);
+    res.status(500).json({ error: 'Failed to get schedule' });
+  }
+});
+
+// Endpoint to delete schedule
+router.delete('/schedule/:id', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const robot = await Robot.findOne({ where: { 'recording_meta.id': id, userId: req.user.id } });
+    if (!robot) {
+      return res.status(404).json({ error: 'Robot not found' });
+    }
+
+    // Cancel the scheduled job
+    try {
+      await cancelScheduledWorkflow(id);
+    } catch (error) {
+      logger.log('error', `Error cancelling scheduled job for robot ${id}: ${error}`);
+      // Continue with robot update even if cancellation fails
+    }
+
+    // Delete the schedule from the robot
+    await robot.update({
+      schedule: null
+    });
+
+    capture(
+      'maxun-oss-robot-schedule-deleted',
+      {
+        robotId: id,
+        user_id: req.user?.id,
+        unscheduled_at: new Date().toISOString(),
+      }
+    )
+
+    res.status(200).json({ message: 'Schedule deleted successfully' });
+
+  } catch (error) {
+    console.error('Error deleting schedule:', error);
+    res.status(500).json({ error: 'Failed to delete schedule' });
+  }
+});
+
+/**
+ * POST endpoint for aborting a current interpretation of the run.
+ */
+router.post('/runs/abort/:id', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) { return res.status(401).send({ error: 'Unauthorized' }); }
+
+    const run = await Run.findOne({ where: { runId: req.params.id } });
+
+    if (!run) {
+      return res.status(404).send({ error: 'Run not found' });
+    }
+
+    const robot = await Robot.findOne({ where: { 'recording_meta.id': run.robotMetaId, userId: req.user.id } });
+    if (!robot) {
+      return res.status(404).send({ error: 'Run not found' });
+    }
+
+    if (!['running', 'queued'].includes(run.status)) {
+      return res.status(400).send({ 
+        error: `Cannot abort run with status: ${run.status}` 
+      });
+    }
+
+    const isQueued = run.status === 'queued';
+
+    await run.update({
+      status: 'aborting'
+    });
+
+    if (isQueued) {
+      await run.update({
+        status: 'aborted',
+        finishedAt: new Date().toLocaleString(),
+        log: 'Run aborted while queued'
+      });
+      
+      return res.send({ 
+        success: true, 
+        message: 'Queued run aborted',
+        isQueued: true 
+      });
+    }
+
+    // Immediately stop interpreter like cloud version
+    try {
+      const browser = browserPool.getRemoteBrowser(run.browserId);
+      if (browser && browser.interpreter) {
+        logger.log('info', `Immediately stopping interpreter for run ${req.params.id}`);
+        await browser.interpreter.stopInterpretation();
+      }
+    } catch (immediateStopError: any) {
+      logger.log('warn', `Failed to immediately stop interpreter: ${immediateStopError.message}`);
+    }
+
+    const jobId = await addJob(QUEUE_NAMES.ABORT_RUN, {
+      userId: req.user.id,
+      runId: req.params.id,
+    }, { maxAttempts: 3 });
+
+    logger.log('info', `Abort signal sent for run ${req.params.id}, job ID: ${jobId}`);
+
+    return res.send({ 
+      success: true, 
+      message: 'Run stopped immediately, cleanup queued',
+      jobId,
+      isQueued: false
+    });    
+    
+  } catch (e) {
+    const { message } = e as Error;
+    logger.log('error', `Error aborting run ${req.params.id}: ${message}`);
+    return res.status(500).send({ error: 'Failed to abort run' });
+  }
+});
+
+// Circuit breaker for database connection issues
+let consecutiveDbErrors = 0;
+const MAX_CONSECUTIVE_ERRORS = 3;
+const CIRCUIT_BREAKER_COOLDOWN = 30000;
+let circuitBreakerOpenUntil = 0;
+
+async function processQueuedRuns() {
+  try {
+    if (Date.now() < circuitBreakerOpenUntil) {
+      return;
+    }
+    const queuedRun = await Run.findOne({
+      where: { status: 'queued' },
+      order: [['startedAt', 'ASC']],
+    });
+    consecutiveDbErrors = 0;
+    if (!queuedRun) return;
+
+    const userId = queuedRun.runByUserId;
+    
+    const canCreateBrowser = await browserPool.hasAvailableBrowserSlots(userId, "run");
+    
+    if (canCreateBrowser) {
+      logger.log('info', `Processing queued run ${queuedRun.runId} for user ${userId}`);
+      
+      const recording = await Robot.findOne({
+        where: {
+          'recording_meta.id': queuedRun.robotMetaId
+        },
+        raw: true
+      });
+
+      if (!recording) {
+        await queuedRun.update({
+          status: 'failed',
+          finishedAt: new Date().toLocaleString(),
+          log: 'Recording not found'
+        });
+        return;
+      }
+
+      try {
+        const newBrowserId = await createRemoteBrowserForRun(userId);
+
+        logger.log('info', `Created and initialized browser ${newBrowserId} for queued run ${queuedRun.runId}`);
+
+        await queuedRun.update({
+          status: 'running',
+          browserId: newBrowserId,
+          log: 'Browser created and ready for execution'
+        });
+
+        const jobId = await addJob(QUEUE_NAMES.EXECUTE_RUN, {
+          userId: userId,
+          runId: queuedRun.runId,
+          browserId: newBrowserId,
+        }, { maxAttempts: 1 });
+
+        logger.log('info', `Queued execution for run ${queuedRun.runId} with ready browser ${newBrowserId}, job ID: ${jobId}`);
+        
+      } catch (browserError: any) {
+        logger.log('error', `Failed to create browser for queued run: ${browserError.message}`);
+        await queuedRun.update({
+          status: 'failed',
+          finishedAt: new Date().toLocaleString(),
+          log: `Failed to create browser: ${browserError.message}`
+        });
+      }
+    }
+  } catch (error: any) {
+    consecutiveDbErrors++;
+
+    if (consecutiveDbErrors >= MAX_CONSECUTIVE_ERRORS) {
+      circuitBreakerOpenUntil = Date.now() + CIRCUIT_BREAKER_COOLDOWN;
+      logger.log('error', `Circuit breaker opened after ${MAX_CONSECUTIVE_ERRORS} consecutive errors. Cooling down for ${CIRCUIT_BREAKER_COOLDOWN/1000}s`);
+    }
+
+    logger.log('error', `Error processing queued runs (${consecutiveDbErrors}/${MAX_CONSECUTIVE_ERRORS}): ${error.message}`);
+  }
+}
+
+/**
+ * Recovers orphaned runs that were left in "running" status due to instance crashes
+ * This function runs on server startup to ensure data reliability
+ */
+export async function recoverOrphanedRuns() {
+  try {
+    logger.log('info', 'Starting recovery of orphaned runs...');
+  
+    const orphanedRuns = await Run.findAll({
+      where: { 
+        status: ['running', 'scheduled'] 
+      },
+      order: [['startedAt', 'ASC']]
+    });
+    
+    if (orphanedRuns.length === 0) {
+      logger.log('info', 'No orphaned runs found');
+      return;
+    }
+    
+    logger.log('info', `Found ${orphanedRuns.length} orphaned runs to recover (including scheduled runs)`);
+    
+    for (const run of orphanedRuns) {
+      try {
+        const runData = run.toJSON();
+        logger.log('info', `Recovering orphaned run: ${runData.runId}`);
+        
+        const browser = browserPool.getRemoteBrowser(runData.browserId);
+        
+        if (!browser) {
+          const retryCount = runData.retryCount || 0;
+          
+          if (retryCount < 3) {
+            await run.update({
+              status: 'queued',
+              retryCount: retryCount + 1,
+              serializableOutput: {},
+              binaryOutput: {},
+              browserId: undefined,
+              log: runData.log ? `${runData.log}\n[RETRY ${retryCount + 1}/3] Re-queuing due to server crash` : `[RETRY ${retryCount + 1}/3] Re-queuing due to server crash`
+            });
+            
+            logger.log('info', `Re-queued crashed run ${runData.runId} (retry ${retryCount + 1}/3)`);  
+          } else {
+            const crashRecoveryMessage = `Max retries exceeded (3/3) - Run failed after multiple server crashes.`;
+            
+            await run.update({
+              status: 'failed',
+              finishedAt: new Date().toLocaleString(),
+              log: runData.log ? `${runData.log}\n${crashRecoveryMessage}` : crashRecoveryMessage
+            });
+            
+            logger.log('warn', `Max retries reached for run ${runData.runId}, marked as permanently failed`);
+          }
+          
+          if (runData.browserId) {
+            try {
+              browserPool.deleteRemoteBrowser(runData.browserId);
+              logger.log('info', `Cleaned up stale browser reference: ${runData.browserId}`);
+            } catch (cleanupError: any) {
+              logger.log('warn', `Failed to cleanup browser reference ${runData.browserId}: ${cleanupError.message}`);
+            }
+          }
+        } else {
+          logger.log('info', `Run ${runData.runId} browser still active, not orphaned`);
+        }
+      } catch (runError: any) {
+        logger.log('error', `Failed to recover run ${run.runId}: ${runError.message}`);
+      }
+    }
+    
+    logger.log('info', `Orphaned run recovery completed. Processed ${orphanedRuns.length} runs.`);
+  } catch (error: any) {
+    logger.log('error', `Failed to recover orphaned runs: ${error.message}`);
+  }
+}
+
+/**
+ * Threshold (in minutes) after which a run sitting in 'running' with no active
+ * browser session in this instance's pool is considered "stuck" and recovered.
+ * This is intentionally larger than the EXECUTE_RUN interpretation timeout
+ * plus the browser-acquisition wait, so that genuinely in-progress runs are
+ * never recovered prematurely.
+ */
+const STUCK_RUNNING_THRESHOLD_MINUTES = 16;
+
+/**
+ * Periodic watchdog for runs stuck in 'running'.
+ *
+ * Unlike {@link recoverOrphanedRuns} (which only runs once at server startup,
+ * when the in-memory browser pool is guaranteed to be empty), this function is
+ * intended to run on a recurring interval. It catches runs that never progress
+ * past 'running' because the job that was supposed to execute them was lost
+ * (e.g. an unhandled rejection, a dropped job notification, etc.) without
+ * requiring a server restart to recover them.
+ *
+ * A run is only touched if it has been 'running' for longer than
+ * {@link STUCK_RUNNING_THRESHOLD_MINUTES} AND this instance has no live browser
+ * for it in {@link browserPool} — i.e. it is not actively being processed here.
+ * Recovery here just sets status back to 'queued'; the existing processQueuedRuns
+ * poller (running every 5s) picks it back up — no separate re-enqueue call needed.
+ */
+export async function recoverStuckRunningRuns() {
+  try {
+    const stuckRuns = await Run.findAll({
+      attributes: { exclude: ['serializableOutput', 'binaryOutput'] },
+      where: {
+        [Op.and]: [
+          { status: 'running' },
+          literal(`
+            CASE
+              WHEN "startedAt" ~ '^[0-9]{4}-'
+              THEN "startedAt"::timestamptz
+              ELSE to_timestamp("startedAt", 'FMMM/FMDD/YYYY, FMHH12:MI:SS AM')
+            END < now() - interval '${STUCK_RUNNING_THRESHOLD_MINUTES} minutes'
+          `),
+        ],
+      },
+      order: [['startedAt', 'ASC']],
+    });
+
+    if (stuckRuns.length === 0) {
+      return;
+    }
+
+    logger.log('warn', `Found ${stuckRuns.length} run(s) stuck in 'running' for over ${STUCK_RUNNING_THRESHOLD_MINUTES} minutes`);
+
+    for (const run of stuckRuns) {
+      try {
+        const runData = run.toJSON();
+
+        const browser = browserPool.getRemoteBrowser(runData.browserId);
+        if (browser) {
+          logger.log('info', `Run ${runData.runId} still has an active browser session, not treating as stuck`);
+          continue;
+        }
+
+        logger.log('warn', `Run ${runData.runId} has been 'running' for over ${STUCK_RUNNING_THRESHOLD_MINUTES} minutes with no active browser session - recovering`);
+
+        const retryCount = runData.retryCount || 0;
+        let recoveredStatus: 'queued' | 'failed' = 'failed';
+
+        if (retryCount < 3 && runData.runByUserId) {
+          await run.update({
+            status: 'queued',
+            retryCount: retryCount + 1,
+            serializableOutput: {},
+            binaryOutput: {},
+            browserId: undefined,
+            log: runData.log
+              ? `${runData.log}\n[RETRY ${retryCount + 1}/3] Re-queuing - run was stuck in 'running' with no progress for over ${STUCK_RUNNING_THRESHOLD_MINUTES} minutes`
+              : `[RETRY ${retryCount + 1}/3] Re-queuing - run was stuck in 'running' with no progress for over ${STUCK_RUNNING_THRESHOLD_MINUTES} minutes`,
+          });
+
+          logger.log('info', `Re-queued stuck run ${runData.runId} for processing (retry ${retryCount + 1}/3)`);
+          recoveredStatus = 'queued';
+        } else {
+          const message = `Run timed out - stuck in 'running' for over ${STUCK_RUNNING_THRESHOLD_MINUTES} minutes with no active browser session (${retryCount >= 3 ? 'max retries exceeded' : 'missing user reference'}).`;
+
+          await run.update({
+            status: 'failed',
+            finishedAt: new Date().toLocaleString(),
+            log: runData.log ? `${runData.log}\n${message}` : message,
+          });
+          recoveredStatus = 'failed';
+        }
+
+        try {
+          if (runData.runByUserId) {
+            const recoveryData = {
+              runId: runData.runId,
+              robotMetaId: runData.robotMetaId,
+              status: recoveredStatus,
+              finishedAt: new Date().toLocaleString(),
+              recovered: true,
+              message: recoveredStatus === 'queued'
+                ? 'Run was stuck and has been automatically re-queued for retry'
+                : 'Run was stuck in running state and has been marked as failed',
+            };
+
+            const userId = runData.runByUserId.toString();
+            serverIo.of('/queued-run').to(`user-${userId}`).emit(
+              recoveredStatus === 'failed' ? 'run-completed' : 'run-recovered',
+              recoveryData
+            );
+
+            if (!recentRecoveries.has(userId)) {
+              recentRecoveries.set(userId, []);
+            }
+            recentRecoveries.get(userId)!.push(recoveryData);
+          }
+        } catch (socketError: any) {
+          logger.log('warn', `Failed to emit recovery notification for stuck run ${runData.runId}: ${socketError.message}`);
+        }
+
+        if (runData.browserId) {
+          try {
+            browserPool.deleteRemoteBrowser(runData.browserId);
+            logger.log('info', `Cleaned up stale browser reference: ${runData.browserId}`);
+          } catch (cleanupError: any) {
+            logger.log('warn', `Failed to cleanup browser reference ${runData.browserId}: ${cleanupError.message}`);
+          }
+        }
+      } catch (runError: any) {
+        logger.log('error', `Failed to recover stuck run ${run.runId}: ${runError.message}`);
+      }
+    }
+  } catch (error: any) {
+    logger.log('error', `Error in recoverStuckRunningRuns: ${error.message}`);
+  }
+}
+
+/**
+ * POST endpoint for creating a crawl robot
+ * @route POST /recordings/crawl
+ * @auth requireSignIn - JWT authentication required
+ */
+router.post('/recordings/crawl', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { url, name, crawlConfig, formats } = req.body;
+
+    if (!url || !crawlConfig) {
+      return res.status(400).json({ error: 'URL and crawl configuration are required.' });
+    }
+
+    if (!req.user) {
+      return res.status(401).send({ error: 'Unauthorized' });
+    }
+
+    let normalizedUrl: string;
+    try {
+      normalizedUrl = normalizeRobotUrl(url);
+    } catch (err) {
+      return res.status(400).json({ error: 'Invalid URL format' });
+    }
+
+    const robotName = (typeof name === 'string' ? name.trim() : '') || `Crawl Robot - ${new URL(normalizedUrl).hostname}`;
+    if (!robotName) {
+      return res.status(400).json({ error: 'Robot name cannot be empty.' });
+    }
+
+    if (await isRobotNameTaken(robotName, req.user.id)) {
+      return res.status(409).json({ error: `A robot with the name "${robotName}" already exists.` });
+    }
+
+    const { validFormats: requestedFormats, invalidFormats } = parseOutputFormats(formats);
+    if (invalidFormats.length > 0) {
+      return res.status(400).json({
+        error: `Invalid formats: ${invalidFormats.map(String).join(', ')}`,
+      });
+    }
+
+    // Crawl always needs formats; use defaults even if explicit empty array is provided
+    const crawlFormats: OutputFormats[] = requestedFormats.length > 0
+      ? requestedFormats
+      : [...DEFAULT_OUTPUT_FORMATS];
+
+    const currentTimestamp = new Date().toLocaleString('en-US');
+    const robotId = uuid();
+
+    const newRobot = await Robot.create({
+      id: uuid(),
+      userId: req.user.id,
+      recording_meta: {
+        name: robotName,
+        id: robotId,
+        createdAt: currentTimestamp,
+        updatedAt: currentTimestamp,
+        pairs: 1,
+        params: [],
+        type: 'crawl',
+        url: normalizedUrl,
+        formats: crawlFormats,
+      },
+      recording: {
+        workflow: [
+          {
+            where: { url: normalizedUrl },
+            what: [
+              { action: 'flag', args: ['generated'] },
+              {
+                action: 'crawl',
+                args: [crawlConfig],
+                name: 'Crawl'
+              }
+            ]
+          },
+          {
+            where: { url: 'about:blank' },
+            what: [
+              {
+                action: 'goto',
+                args: [normalizedUrl]
+              },
+              {
+                action: 'waitForLoadState',
+                args: ['networkidle']
+              }
+            ]
+          }
+        ]
+      },
+      google_sheet_email: null,
+      google_sheet_name: null,
+      google_sheet_id: null,
+      google_access_token: null,
+      google_refresh_token: null,
+      airtable_base_id: null,
+      airtable_base_name: null,
+      airtable_table_name: null,
+      airtable_table_id: null,
+      airtable_access_token: null,
+      airtable_refresh_token: null,
+      schedule: null,
+      webhooks: null
+    });
+
+    logger.log('info', `Crawl robot created with id: ${newRobot.id}`);
+    capture('maxun-oss-robot-created', {
+      userId: req.user.id.toString(),
+      robotId: robotId,
+      robotName: robotName,
+      url: normalizedUrl,
+      robotType: 'crawl',
+      crawlConfig: crawlConfig,
+      robot_meta: newRobot.recording_meta,
+      recording: newRobot.recording,
+    });
+
+    return res.status(201).json({
+      message: 'Crawl robot created successfully.',
+      robot: newRobot,
+    });
+  } catch (error: any) {
+    if (error.name === 'SequelizeUniqueConstraintError' || error.parent?.code === '23505') {
+      return res.status(409).json({ error: 'A robot with this name already exists.' });
+    }
+    if (error instanceof Error) {
+      logger.log('error', `Error creating crawl robot: ${error.message}`);
+      return res.status(500).json({ error: error.message });
+    } else {
+      logger.log('error', 'Unknown error creating crawl robot');
+      return res.status(500).json({ error: 'An unknown error occurred.' });
+    }
+  }
+});
+
+/**
+ * POST endpoint for creating a search robot
+ * @route POST /recordings/search
+ * @auth requireSignIn - JWT authentication required
+ */
+router.post('/recordings/search', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { searchConfig, name, formats } = req.body;
+
+    if (!searchConfig || !searchConfig.query) {
+      return res.status(400).json({ error: 'Search configuration with query is required.' });
+    }
+
+    if (!req.user) {
+      return res.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const robotName = (typeof name === 'string' ? name.trim() : '') || `Search Robot - ${searchConfig.query.substring(0, 50)}`;
+    if (!robotName) {
+      return res.status(400).json({ error: 'Robot name cannot be empty.' });
+    }
+
+    if (await isRobotNameTaken(robotName, req.user.id)) {
+      return res.status(409).json({ error: `A robot with the name "${robotName}" already exists.` });
+    }
+
+    const { validFormats: requestedFormats, invalidFormats } = parseOutputFormats(
+      formats,
+      searchConfig.mode === 'scrape' ? SEARCH_SCRAPE_OUTPUT_FORMAT_OPTIONS : undefined
+    );
+    if (invalidFormats.length > 0) {
+      return res.status(400).json({
+        error: `Invalid formats: ${invalidFormats.map(String).join(', ')}`,
+      });
+    }
+
+    let searchFormats: OutputFormats[];
+    if (searchConfig.mode === 'discover') {
+      // Discover-mode: always empty, ignore caller input
+      searchFormats = [];
+    } else {
+      // Scrape-mode: apply defaults if empty
+      searchFormats = requestedFormats.length > 0 ? requestedFormats : [...DEFAULT_OUTPUT_FORMATS];
+    }
+
+    const currentTimestamp = new Date().toLocaleString('en-US');
+    const robotId = uuid();
+
+    const newRobot = await Robot.create({
+      id: uuid(),
+      userId: req.user.id,
+      recording_meta: {
+        name: robotName,
+        id: robotId,
+        createdAt: currentTimestamp,
+        updatedAt: currentTimestamp,
+        pairs: 1,
+        params: [],
+        type: 'search',
+        formats: searchFormats,
+      },
+      recording: {
+        workflow: [
+          {
+            where: { url: 'about:blank' },
+            what: [{
+              action: 'search',
+              args: [searchConfig],
+              name: 'Search'
+            }]
+          }
+        ]
+      },
+      google_sheet_email: null,
+      google_sheet_name: null,
+      google_sheet_id: null,
+      google_access_token: null,
+      google_refresh_token: null,
+      airtable_base_id: null,
+      airtable_base_name: null,
+      airtable_table_name: null,
+      airtable_table_id: null,
+      airtable_access_token: null,
+      airtable_refresh_token: null,
+      schedule: null,
+      webhooks: null
+    });
+
+    logger.log('info', `Search robot created with id: ${newRobot.id}`);
+    capture('maxun-oss-robot-created', {
+      userId: req.user.id.toString(),
+      robotId: robotId,
+      robotName: robotName,
+      robotType: 'search',
+      searchQuery: searchConfig.query,
+      searchProvider: searchConfig.provider || 'duckduckgo',
+      searchLimit: searchConfig.limit || 10,
+      robot_meta: newRobot.recording_meta,
+      recording: newRobot.recording,
+    });
+
+    return res.status(201).json({
+      message: 'Search robot created successfully.',
+      robot: newRobot,
+    });
+  } catch (error: any) {
+    if (error.name === 'SequelizeUniqueConstraintError' || error.parent?.code === '23505') {
+      return res.status(409).json({ error: 'A robot with this name already exists.' });
+    }
+    if (error instanceof Error) {
+      logger.log('error', `Error creating search robot: ${error.message}`);
+      return res.status(500).json({ error: error.message });
+    } else {
+      logger.log('error', 'Unknown error creating search robot');
+      return res.status(500).json({ error: 'An unknown error occurred.' });
+    }
+  }
+});
+
+/**
+ * POST endpoint for creating a document extraction robot (doc-extract).
+ * Accepts a PDF upload and an extraction prompt. Uses the configured LLM to generate
+ * an extraction schema and stores the document in MinIO.
+ */
+router.post(
+  '/recordings/document',
+  requireSignIn,
+  pdfUpload.single('file'),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+      const file = (req as any).file as Express.Multer.File | undefined;
+      if (!file) return res.status(400).json({ error: 'A PDF file is required.' });
+
+      const { prompt, name, llmProvider, llmModel, llmApiKey, llmBaseUrl } = req.body;
+      if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+        return res.status(400).json({ error: 'The "prompt" field is required.' });
+      }
+
+      const finalName = (typeof name === 'string' ? name.trim() : '') || `Document: ${prompt.substring(0, 50)}`;
+      if (await isRobotNameTaken(finalName, req.user.id)) {
+        return res.status(409).json({ error: `A robot with the name "${finalName}" already exists.` });
+      }
+
+      const { robot, extractionSchema } = await createDocumentRobotRecord({
+        pdfBuffer: file.buffer,
+        originalFileName: file.originalname,
+        prompt: prompt.trim(),
+        robotName: finalName,
+        llmProvider: llmProvider as 'anthropic' | 'openai' | 'ollama' | undefined,
+        llmModel: typeof llmModel === 'string' ? llmModel : undefined,
+        llmApiKey: typeof llmApiKey === 'string' ? llmApiKey : undefined,
+        llmBaseUrl: typeof llmBaseUrl === 'string' ? llmBaseUrl : undefined,
+        userId: req.user.id,
+      });
+
+      capture('maxun-oss-robot-created', {
+        robot_meta: robot.recording_meta,
+        robot_type: 'doc-extract',
+      });
+
+      return res.status(201).json({
+        message: 'Document extraction robot created successfully.',
+        robot,
+        extractionSchema,
+      });
+    } catch (error: any) {
+      if (error.name === 'SequelizeUniqueConstraintError' || error.parent?.code === '23505') {
+        return res.status(409).json({ error: 'A robot with this name already exists.' });
+      }
+      logger.error(`Error creating document extraction robot: ${error.message}`);
+      return res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+/**
+ * POST endpoint for creating a document parse robot (doc-parse).
+ * Accepts a PDF upload and output format list. Parses the document immediately and
+ * stores both the document and parsed output in MinIO / database.
+ */
+router.post(
+  '/recordings/document-parse',
+  requireSignIn,
+  pdfUpload.single('file'),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+      const file = (req as any).file as Express.Multer.File | undefined;
+      if (!file) return res.status(400).json({ error: 'A PDF file is required.' });
+
+      const { name, formats } = req.body;
+
+      const DOC_PARSE_FORMATS: OutputFormats[] = ['markdown', 'html', 'links'];
+      const rawFormats = Array.isArray(formats) ? formats : (typeof formats === 'string' ? [formats] : []);
+      const outputFormats: OutputFormats[] = rawFormats.length > 0
+        ? rawFormats.filter((f: string) => DOC_PARSE_FORMATS.includes(f as OutputFormats))
+        : DOC_PARSE_FORMATS;
+
+      const finalName = (typeof name === 'string' ? name.trim() : '') || `Doc Parse: ${file.originalname}`;
+      if (await isRobotNameTaken(finalName, req.user.id)) {
+        return res.status(409).json({ error: `A robot with the name "${finalName}" already exists.` });
+      }
+
+      const { robot, parsedOutput } = await createDocumentParseRobotRecord({
+        pdfBuffer: file.buffer,
+        originalFileName: file.originalname,
+        robotName: finalName,
+        outputFormats,
+        userId: req.user.id,
+      });
+
+      capture('maxun-oss-robot-created', {
+        robot_meta: robot.recording_meta,
+        robot_type: 'doc-parse',
+      });
+
+      return res.status(201).json({
+        message: 'Document parse robot created successfully.',
+        robot,
+        parsedOutput,
+      });
+    } catch (error: any) {
+      if (error.name === 'SequelizeUniqueConstraintError' || error.parent?.code === '23505') {
+        return res.status(409).json({ error: 'A robot with this name already exists.' });
+      }
+      logger.error(`Error creating document parse robot: ${error.message}`);
+      return res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+/**
+ * POST endpoint to trigger a document extraction run for a doc-extract robot.
+ * Creates a Run record and queues the job — no browser is launched.
+ */
+router.post('/runs/document-run/:id', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const recording = await Robot.findOne({ where: { 'recording_meta.id': req.params.id, userId: req.user.id }, raw: true });
+    if (!recording) return res.status(404).json({ error: 'Robot not found.' });
+    if (recording.recording_meta.type !== 'doc-extract') {
+      return res.status(400).json({ error: 'Robot is not a document extraction robot.' });
+    }
+
+    const runId = uuid();
+    const now = new Date().toLocaleString();
+
+    await Run.create({
+      status: 'running',
+      name: recording.recording_meta.name,
+      robotId: recording.id,
+      robotMetaId: recording.recording_meta.id,
+      startedAt: now,
+      finishedAt: '',
+      browserId: uuid(),
+      interpreterSettings: { maxConcurrency: 1, maxRepeats: 1, debug: false, robotType: 'doc-extract' },
+      log: 'Document extraction queued',
+      runId,
+      runByUserId: req.user.id,
+      serializableOutput: {},
+      binaryOutput: {},
+    } as any);
+
+    await addJob(QUEUE_NAMES.EXECUTE_RUN, {
+      userId: req.user.id,
+      runId,
+      browserId: runId,
+    }, { maxAttempts: 1 });
+
+    serverIo.of('/queued-run').to(`user-${req.user.id}`).emit('run-started', {
+      runId,
+      robotMetaId: recording.recording_meta.id,
+      robotName: recording.recording_meta.name,
+      status: 'running',
+      startedAt: now,
+      runByUserId: req.user.id,
+    });
+
+    logger.log('info', `Queued document-run ${runId} for robot ${recording.recording_meta.id}`);
+    return res.status(202).json({ runId, robotMetaId: recording.recording_meta.id, status: 'running' });
+  } catch (error: any) {
+    logger.error(`Error starting document run: ${error.message}`);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST endpoint to trigger a document parse run for a doc-parse robot.
+ * Creates a Run record and queues the job — no browser is launched.
+ */
+router.post('/runs/document-parse-run/:id', requireSignIn, async (req: AuthenticatedRequest, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const recording = await Robot.findOne({ where: { 'recording_meta.id': req.params.id, userId: req.user.id }, raw: true });
+    if (!recording) return res.status(404).json({ error: 'Robot not found.' });
+    if (recording.recording_meta.type !== 'doc-parse') {
+      return res.status(400).json({ error: 'Robot is not a document parse robot.' });
+    }
+
+    const runId = uuid();
+    const now = new Date().toLocaleString();
+
+    await Run.create({
+      status: 'running',
+      name: recording.recording_meta.name,
+      robotId: recording.id,
+      robotMetaId: recording.recording_meta.id,
+      startedAt: now,
+      finishedAt: '',
+      browserId: uuid(),
+      interpreterSettings: { maxConcurrency: 1, maxRepeats: 1, debug: false, robotType: 'doc-parse' },
+      log: 'Document parse queued',
+      runId,
+      runByUserId: req.user.id,
+      serializableOutput: {},
+      binaryOutput: {},
+    } as any);
+
+    await addJob(QUEUE_NAMES.EXECUTE_RUN, {
+      userId: req.user.id,
+      runId,
+      browserId: runId,
+    }, { maxAttempts: 1 });
+
+    serverIo.of('/queued-run').to(`user-${req.user.id}`).emit('run-started', {
+      runId,
+      robotMetaId: recording.recording_meta.id,
+      robotName: recording.recording_meta.name,
+      status: 'running',
+      startedAt: now,
+      runByUserId: req.user.id,
+    });
+
+    logger.log('info', `Queued document-parse-run ${runId} for robot ${recording.recording_meta.id}`);
+    return res.status(202).json({ runId, robotMetaId: recording.recording_meta.id, status: 'running' });
+  } catch (error: any) {
+    logger.error(`Error starting document parse run: ${error.message}`);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * PUT endpoint to replace the PDF document for an existing doc-extract or doc-parse robot.
+ */
+router.put(
+  '/recordings/:id/document',
+  requireSignIn,
+  pdfUpload.single('file'),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+      const file = (req as any).file as Express.Multer.File | undefined;
+      if (!file) return res.status(400).json({ error: 'A PDF file is required.' });
+
+      const robot = await Robot.findOne({ where: { 'recording_meta.id': req.params.id, userId: req.user.id } });
+      if (!robot) return res.status(404).json({ error: 'Robot not found.' });
+
+      const robotType = robot.recording_meta.type;
+      if (robotType !== 'doc-extract' && robotType !== 'doc-parse') {
+        return res.status(400).json({ error: 'Robot is not a document robot.' });
+      }
+
+      const { uploadDocumentToMinio } = await import('../storage/mino');
+      const documentKey = (robot.recording as any).documentKey;
+      if (!documentKey) return res.status(400).json({ error: 'Robot has no document key.' });
+
+      await uploadDocumentToMinio(documentKey, file.buffer);
+
+      const updatedRecording: any = {
+        ...(robot.recording as any),
+        documentFileName: file.originalname,
+      };
+
+      await robot.update({ recording: updatedRecording });
+
+      logger.log('info', `Replaced document for robot ${req.params.id}`);
+      return res.status(200).json({ message: 'Document replaced successfully.' });
+    } catch (error: any) {
+      logger.error(`Error replacing document: ${error.message}`);
+      return res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+export { processQueuedRuns };
