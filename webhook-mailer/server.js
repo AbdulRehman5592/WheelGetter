@@ -36,6 +36,55 @@ transporter.verify((error, success) => {
 // Track processed run IDs to prevent duplicates
 const processedRuns = new Set();
 
+// Helper to generate HTML email with better formatting
+function generateHtmlEmail(robotName, status, runUrl, capturedTexts, capturedLists, rawOutput) {
+  let html = `
+    <h2>Maxun Scrape Results</h2>
+    <p><strong>Robot:</strong> ${robotName || 'Unknown'}</p>
+    <p><strong>Status:</strong> ${status}</p>
+    <p><strong>View Results:</strong> <a href="${runUrl}">${runUrl}</a></p>
+  `;
+
+  if (capturedTexts.length > 0) {
+    html += `<h3>Captured Data</h3>`;
+    capturedTexts.forEach(text => {
+      html += `<pre style="background:#f5f5f5;padding:10px;border-radius:4px;overflow-x:auto;">${JSON.stringify(text, null, 2)}</pre>`;
+    });
+  }
+
+  if (Object.keys(capturedLists).length > 0) {
+    html += `<h3>Captured Lists</h3>`;
+    for (const [listName, items] of Object.entries(capturedLists)) {
+      html += `<h4>${listName}</h4>`;
+      if (Array.isArray(items) && items.length > 0) {
+        html += `<table style="border-collapse:collapse;width:100%;max-width:800px;">`;
+        const headers = Object.keys(items[0]);
+        html += `<tr style="background:#007bff;color:white;">`;
+        headers.forEach(h => {
+          html += `<th style="padding:8px;border:1px solid #ddd;">${h}</th>`;
+        });
+        html += `</tr>`;
+        items.forEach((item, idx) => {
+          html += `<tr style="${idx % 2 === 0 ? 'background:#f9f9f9' : ''}">`;
+          headers.forEach(h => {
+            html += `<td style="padding:8px;border:1px solid #ddd;">${item[h] || ''}</td>`;
+          });
+          html += `</tr>`;
+        });
+        html += `</table>`;
+      }
+    }
+  }
+
+  if (rawOutput) {
+    html += `<h3>Raw Output</h3><pre style="background:#f5f5f5;padding:10px;border-radius:4px;overflow-x:auto;">${rawOutput}</pre>`;
+  }
+
+  html += `<hr><small>Sent by Maxun Webhook Mailer</small>`;
+  return html;
+}
+
+
 app.post('/webhook', async (req, res) => {
   try {
     const { data } = req.body;
@@ -72,9 +121,42 @@ app.post('/webhook', async (req, res) => {
 
     const runUrl = `${process.env.MAXUN_PUBLIC_URL || 'http://localhost:5173'}/runs/${runId}`;
 
-    const emailBody = `Robot: ${robotName || 'Unknown'}
+    // Build email body with scraped data
+    let emailBody = `Robot: ${robotName || 'Unknown'}
 Status: ${status}
-View results: ${runUrl}`;
+View results: ${runUrl}
+`;
+
+    // Add captured texts
+    const capturedTexts = data.extracted_data?.captured_texts || data.captured_texts || [];
+    if (capturedTexts.length > 0) {
+      emailBody += `\n=== Captured Data ===\n`;
+      capturedTexts.forEach(text => {
+        emailBody += `\n${JSON.stringify(text, null, 2)}\n`;
+      });
+    }
+
+    // Add captured lists (tabular data)
+    const capturedLists = data.extracted_data?.captured_lists || data.captured_lists || {};
+    if (Object.keys(capturedLists).length > 0) {
+      emailBody += `\n=== Captured Lists ===\n`;
+      for (const [listName, items] of Object.entries(capturedLists)) {
+        emailBody += `\n${listName}:\n`;
+        if (Array.isArray(items) && items.length > 0) {
+          const headers = Object.keys(items[0]).join(' | ');
+          emailBody += `${headers}\n`;
+          emailBody += `${'-'.repeat(headers.length)}\n`;
+          items.forEach(item => {
+            emailBody += `${Object.values(item).join(' | ')}\n`;
+          });
+        }
+      }
+    }
+
+    // Add raw output if available
+    if (data.output) {
+      emailBody += `\n=== Raw Output ===\n${data.output}\n`;
+    }
 
     console.log('Sending email to:', process.env.TO_EMAIL);
 
@@ -82,7 +164,9 @@ View results: ${runUrl}`;
       from: process.env.SMTP_USER,
       to: process.env.TO_EMAIL,
       subject: `[Maxun] Scrape: ${robotName || 'Robot'} - ${status}`,
-      text: emailBody
+      text: emailBody,
+      // Optional: add HTML version for better formatting
+      html: generateHtmlEmail(robotName, status, runUrl, capturedTexts, capturedLists, data.output)
     });
 
     console.log('=== Email Sent Successfully ===');
