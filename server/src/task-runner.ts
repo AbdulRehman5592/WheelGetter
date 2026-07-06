@@ -350,7 +350,22 @@ async function processRunExecution(data: ExecuteRunData): Promise<void> {
           }
 
           try {
-            const webhookPayload: any = { runId: data.runId, robotId: plainRun.robotMetaId, robotName: recording.recording_meta.name, status: 'success', finishedAt: new Date().toLocaleString() };
+            const webhookPayload: any = {
+              runId: data.runId,
+              robotId: plainRun.robotMetaId,
+              robotName: recording.recording_meta.name,
+              status: 'success',
+              finishedAt: new Date().toLocaleString(),
+              extracted_data: {
+                captured_texts: serializableOutput.json || serializableOutput.csv || {},
+                captured_lists: {},
+                markdown: serializableOutput.markdown?.[0]?.content || '',
+                text: serializableOutput.text?.[0]?.content || '',
+                html: serializableOutput.html?.[0]?.content || '',
+                links: serializableOutput.links || [],
+                summary: serializableOutput.summary?.[0]?.content || ''
+              }
+            };
             if (serializableOutput.markdown) webhookPayload.markdown = serializableOutput.markdown[0]?.content || '';
             if (serializableOutput.html) webhookPayload.html = serializableOutput.html[0]?.content || '';
             if (serializableOutput.links) webhookPayload.links = serializableOutput.links;

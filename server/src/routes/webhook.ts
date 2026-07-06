@@ -424,6 +424,17 @@ export const sendWebhook = async (robotId: string, eventType: string, data: any)
                 data: data
             };
 
+            // DEBUG: Log webhook payload before sending
+            console.log('[WEBHOOK SEND] Sending webhook to:', webhook.url);
+            console.log('[WEBHOOK SEND] Event type:', eventType);
+            console.log('[WEBHOOK SEND] Payload data keys:', Object.keys(payload.data || {}).join(', '));
+            console.log('[WEBHOOK SEND] Has extracted_data:', !!payload.data?.extracted_data);
+            if (payload.data?.extracted_data) {
+                console.log('[WEBHOOK SEND] extracted_data keys:', Object.keys(payload.data.extracted_data).join(', '));
+                console.log('[WEBHOOK SEND] captured_texts:', JSON.stringify(payload.data.extracted_data.captured_texts || 'N/A').substring(0, 200));
+            }
+            console.log('[WEBHOOK SEND] Full payload:', JSON.stringify(payload).substring(0, 1000));
+
             return sendWebhookWithRetry(robotId, webhook, payload);
         });
 

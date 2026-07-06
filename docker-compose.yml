@@ -56,6 +56,8 @@ services:
       - minio
     volumes:
       - /var/run/dbus:/var/run/dbus
+      - ./server:/app/server
+      - ./server/dist:/app/server/dist
 
   frontend:
     # build:

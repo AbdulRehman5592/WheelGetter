@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const nodemailer = require('nodemailer');
 
@@ -11,11 +12,13 @@ console.log('SMTP Host:', process.env.SMTP_HOST);
 console.log('SMTP Port:', process.env.SMTP_PORT);
 console.log('SMTP User:', process.env.SMTP_USER);
 console.log('To Email:', process.env.TO_EMAIL);
+console.log('Maxun API Key:', process.env.MAXUN_API_KEY ? 'configured' : 'NOT SET');
+console.log('Maxun Backend:', process.env.MAXUN_BACKEND_URL);
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
   port: parseInt(process.env.SMTP_PORT) || 587,
-  secure: false,
+  secure: parseInt(process.env.SMTP_PORT) === 465, // true for 465 (SSL), false for 587 (STARTTLS)
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS
@@ -37,12 +40,12 @@ transporter.verify((error, success) => {
 const processedRuns = new Set();
 
 // Helper to generate HTML email with better formatting
-function generateHtmlEmail(robotName, status, runUrl, capturedTexts, capturedLists, rawOutput) {
+function generateHtmlEmail(robotName, status, capturedTexts, capturedLists, markdownOutput, textContent) {
   let html = `
     <h2>Maxun Scrape Results</h2>
     <p><strong>Robot:</strong> ${robotName || 'Unknown'}</p>
     <p><strong>Status:</strong> ${status}</p>
-    <p><strong>View Results:</strong> <a href="${runUrl}">${runUrl}</a></p>
+    <p><strong>Time:</strong> ${new Date().toISOString()}</p>
   `;
 
   if (capturedTexts.length > 0) {
@@ -76,8 +79,12 @@ function generateHtmlEmail(robotName, status, runUrl, capturedTexts, capturedLis
     }
   }
 
-  if (rawOutput) {
-    html += `<h3>Raw Output</h3><pre style="background:#f5f5f5;padding:10px;border-radius:4px;overflow-x:auto;">${rawOutput}</pre>`;
+  if (textContent) {
+    html += `<h3>Scraped Text Content</h3><pre style="background:#f5f5f5;padding:10px;border-radius:4px;overflow-x:auto;max-height:400px;overflow-y:auto;">${textContent}</pre>`;
+  }
+
+  if (markdownOutput) {
+    html += `<h3>Markdown</h3><pre style="background:#f5f5f5;padding:10px;border-radius:4px;overflow-x:auto;">${markdownOutput}</pre>`;
   }
 
   html += `<hr><small>Sent by Maxun Webhook Mailer</small>`;
@@ -88,18 +95,22 @@ function generateHtmlEmail(robotName, status, runUrl, capturedTexts, capturedLis
 app.post('/webhook', async (req, res) => {
   try {
     const { data } = req.body;
-
-    console.log('\n=== Webhook Received ===');
+    console.log("data =", JSON.stringify(data, null, 2));
+    console.log('\n=== Webhook Received ===12');
     console.log('Event:', req.body.event_type);
+    console.log('Full data keys:', Object.keys(data || {}));
+    console.log('Full payload:', JSON.stringify(req.body, null, 2));
 
     // Handle both camelCase (runId) and snake_case (run_id)
     const runId = data?.runId || data?.run_id;
     const robotName = data?.robotName || data?.robot_name;
     const status = data?.status;
+    const textValue = data.extracted_data['text'];
 
     console.log('Robot:', robotName);
     console.log('Run ID:', runId);
     console.log('Status:', status);
+    console.log("Text:",textValue);
 
     if (!data || !runId) {
       console.error('Invalid webhook payload - missing run_id');
@@ -107,10 +118,10 @@ app.post('/webhook', async (req, res) => {
     }
 
     // Idempotency: skip if already processed
-    if (processedRuns.has(runId)) {
-      console.log('Run already processed, skipping:', runId);
-      return res.json({ skipped: true, run_id: runId, reason: 'already processed' });
-    }
+    // if (processedRuns.has(runId)) {
+    //   console.log('Run already processed, skipping:', runId);
+    //   return res.json({ skipped: true, run_id: runId, reason: 'already processed' });
+    // }
     processedRuns.add(runId);
 
     // Cleanup old entries (keep last 1000)
@@ -119,15 +130,16 @@ app.post('/webhook', async (req, res) => {
       processedRuns.delete(first);
     }
 
-    const runUrl = `${process.env.MAXUN_PUBLIC_URL || 'http://localhost:5173'}/runs/${runId}`;
+    console.log('Extracted data keys:', Object.keys(data.extracted_data || {}));
 
     // Build email body with scraped data
     let emailBody = `Robot: ${robotName || 'Unknown'}
 Status: ${status}
-View results: ${runUrl}
+Time: ${new Date().toISOString()}
+Text:${textValue}
 `;
 
-    // Add captured texts
+    // Add captured texts from webhook data
     const capturedTexts = data.extracted_data?.captured_texts || data.captured_texts || [];
     if (capturedTexts.length > 0) {
       emailBody += `\n=== Captured Data ===\n`;
@@ -136,7 +148,7 @@ View results: ${runUrl}
       });
     }
 
-    // Add captured lists (tabular data)
+    // Add captured lists (tabular data) from webhook data
     const capturedLists = data.extracted_data?.captured_lists || data.captured_lists || {};
     if (Object.keys(capturedLists).length > 0) {
       emailBody += `\n=== Captured Lists ===\n`;
@@ -153,11 +165,24 @@ View results: ${runUrl}
       }
     }
 
-    // Add raw output if available
-    if (data.output) {
-      emailBody += `\n=== Raw Output ===\n${data.output}\n`;
+    // Add text content from extracted_data (scraped page text)
+    if (req.body?.data?.extracted_data?.text) {
+      emailBody += `\n=== Scraped Text ===\n${req.body?.data?.extracted_data?.text}\n`;
     }
 
+    // Add markdown from extracted_data
+    if (data.extracted_data?.markdown) {
+      emailBody += `\n=== Markdown ===\n${data.extracted_data.markdown}\n`;
+    }
+
+    // Add raw output if available (legacy support)
+    if (data.markdown && !data.extracted_data?.markdown) {
+      emailBody += `\n=== Markdown ===\n${data.markdown}\n`;
+    }
+    if(data.text)
+      {
+      emailBody += `\n=== Markdown ===\n${data.text}\n`;
+    }
     console.log('Sending email to:', process.env.TO_EMAIL);
 
     const info = await transporter.sendMail({
@@ -166,7 +191,7 @@ View results: ${runUrl}
       subject: `[Maxun] Scrape: ${robotName || 'Robot'} - ${status}`,
       text: emailBody,
       // Optional: add HTML version for better formatting
-      html: generateHtmlEmail(robotName, status, runUrl, capturedTexts, capturedLists, data.output)
+      html: generateHtmlEmail(robotName, status, capturedTexts, capturedLists, data.extracted_data?.markdown || data.markdown, data.extracted_data?.text)
     });
 
     console.log('=== Email Sent Successfully ===');
