@@ -9,22 +9,22 @@ async function waitForStability(page: Page): Promise<void> {
       page.evaluate(async () => {
         let lastLen = 0;
         let stableIterations = 0;
-        for (let i = 0; i < 60; i++) {
+        for (let i = 0; i < 100; i++) {
           const currentLen = document.body?.innerText?.length ?? 0;
           if (currentLen > 200 && currentLen === lastLen) {
             stableIterations++;
           } else {
             stableIterations = 0;
           }
-          if (stableIterations >= 8) return true;
+          if (stableIterations >= 15) return true;
           lastLen = currentLen;
           await new Promise(r => setTimeout(r, 100));
         }
         return false;
       }).catch(() => {}),
-      new Promise(resolve => setTimeout(resolve, 10000))
+      new Promise(resolve => setTimeout(resolve, 15000))
     ]);
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await new Promise(resolve => setTimeout(resolve, 3000));
   } catch {}
 }
 

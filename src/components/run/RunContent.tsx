@@ -28,6 +28,7 @@ import ViewListIcon from '@mui/icons-material/ViewList';
 import TravelExploreIcon from '@mui/icons-material/TravelExplore';
 import SearchIcon from '@mui/icons-material/Search';
 import PsychologyIcon from '@mui/icons-material/Psychology';
+import CleaningServicesIcon from '@mui/icons-material/CleaningServices';
 import StorageIcon from '@mui/icons-material/Storage';
 import { ContentCopy, Check } from "@mui/icons-material";
 import { useEffect, useState } from "react";
@@ -244,6 +245,64 @@ const AgentResultView: React.FC<{ content: string; darkMode: boolean }> = ({ con
   );
 };
 
+// Clean HTML and extract items (titles, prices, locations, links)
+const cleanHtmlContent = (html: string): any[] => {
+  if (!html) return [];
+
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  const items: any[] = [];
+
+  // Common selectors for listing items (OLX, Amazon, eBay, etc.)
+  const itemSelectors = [
+    'article',
+    '.item',
+    '.listing',
+    '.product',
+    '[data-testid="listing-card"]',
+    '.ad-item',
+    '.ad-list-item',
+  ];
+
+  // Try each selector
+  for (const selector of itemSelectors) {
+    const elements = doc.querySelectorAll(selector);
+    if (elements.length > 0) {
+      elements.forEach((elem: Element) => {
+        const titleElem = elem.querySelector('h2, h3, h4, .title, [data-testid="ad-title"], .ad-title');
+        const priceElem = elem.querySelector('.price, [data-testid="ad-price"], .ad-price');
+        const locationElem = elem.querySelector('.location, [data-testid="ad-location"], .ad-location');
+        const linkElem = elem.querySelector('a');
+
+        const title = titleElem?.textContent?.trim() || linkElem?.textContent?.trim() || '';
+        const price = priceElem?.textContent?.trim() || '';
+        const location = locationElem?.textContent?.trim() || '';
+        const link = linkElem?.getAttribute('href') || '';
+        const text = elem.textContent?.trim().substring(0, 200) || '';
+
+        if (title || text) {
+          items.push({
+            title: title || 'No title',
+            price: price || '',
+            location: location || '',
+            link: link ? (link.startsWith('http') ? link : `https://www.olx.com.pk${link}`) : '',
+            text: text
+          });
+        }
+      });
+
+      // If we found items with this selector, break
+      if (items.length > 0) {
+        console.log(`Found ${items.length} items using selector: ${selector}`);
+        break;
+      }
+    }
+  }
+
+  return items;
+};
+
 export const RunContent = ({ row, currentLog, interpretationInProgress, logEndRef, abortRunHandler, workflowProgress }: RunContentProps) => {
   const { t } = useTranslation();
   const { darkMode } = useThemeMode();
@@ -275,6 +334,8 @@ export const RunContent = ({ row, currentLog, interpretationInProgress, logEndRe
   const [searchData, setSearchData] = useState<any[]>([]);
   const [searchMode, setSearchMode] = useState<'discover' | 'scrape'>('discover');
   const [currentSearchIndex, setCurrentSearchIndex] = useState<number>(0);
+
+  const [cleanedItems, setCleanedItems] = useState<any[]>([]);
 
   const [screenshotKeys, setScreenshotKeys] = useState<string[]>([]);
   const [rawScreenshotKeys, setRawScreenshotKeys] = useState<string[]>([]);
@@ -381,6 +442,23 @@ export const RunContent = ({ row, currentLog, interpretationInProgress, logEndRe
       }
     }
   }, [row.serializableOutput]);
+
+  // Process HTML content to extract cleaned items
+  useEffect(() => {
+    if (htmlContent && htmlContent.length > 0) {
+      console.log('Cleaning HTML content...');
+      const items = cleanHtmlContent(htmlContent);
+      if (items.length > 0) {
+        console.log(`Extracted ${items.length} items from HTML`);
+        setCleanedItems(items);
+      } else {
+        console.log('No items extracted from HTML');
+        setCleanedItems([]);
+      }
+    } else {
+      setCleanedItems([]);
+    }
+  }, [htmlContent]);
 
 
   useEffect(() => {
@@ -1401,6 +1479,7 @@ export const RunContent = ({ row, currentLog, interpretationInProgress, logEndRe
   const hasTextFormat = textContent && textContent.length > 0;
   const hasLinks = linksContent && linksContent.length > 0;
   const hasSummary = summaryContent && summaryContent.length > 0;
+  const hasCleanedItems = cleanedItems.length > 0;
   const promptResultData = smartQueryResult || null;
   const hasPromptResult = !!promptResultData;
   const hasCrawlPageScreenshots = crawlData.some(group => Array.isArray(group) && group.some((item: any) => item?.screenshotVisible || item?.screenshotFullpage));
@@ -1607,6 +1686,75 @@ export const RunContent = ({ row, currentLog, interpretationInProgress, logEndRe
                         sx={{ color: '#FF00C3', textTransform: 'none', p: 0, minWidth: 'auto', backgroundColor: 'transparent', '&:hover': { textDecoration: 'underline', backgroundColor: 'transparent' } }}
                       >
                         Download Links
+                      </Button>
+                    </Box>
+                  </AccordionDetails>
+                </Accordion>
+              )}
+
+              {hasCleanedItems && (
+                <Accordion defaultExpanded style={{ marginLeft: "-38px" }}>
+                  <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                      <CleaningServicesIcon sx={{ mr: 1 }} />
+                      <Typography variant='subtitle1'>Cleaned Items ({cleanedItems.length})</Typography>
+                    </Box>
+                  </AccordionSummary>
+                  <AccordionDetails>
+                    <Box sx={{ position: 'relative' }}>
+                      <Paper sx={{ p: 2, maxHeight: '500px', overflow: 'auto', backgroundColor: darkMode ? '#1e1e1e' : '#f5f5f5' }}>
+                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                          {cleanedItems.map((item: any, idx: number) => (
+                            <Box key={idx} sx={{ borderBottom: `1px solid ${darkMode ? '#333' : '#e0e0e0'}`, pb: 1, mb: 1 }}>
+                              {item.title && (
+                                <Typography variant="subtitle2" sx={{ fontWeight: 'bold', mb: 0.5, color: '#FF00C3' }}>
+                                  {item.title}
+                                </Typography>
+                              )}
+                              {item.description && (
+                                <Typography variant="body2" sx={{ mb: 0.5, color: 'inherit' }}>
+                                  {item.description}
+                                </Typography>
+                              )}
+                              {item.link && (
+                                <Link href={item.link} target="_blank" rel="noopener" sx={{ color: '#FF00C3', wordBreak: 'break-all', fontSize: '0.875rem' }}>
+                                  {item.link}
+                                </Link>
+                              )}
+                              {item.price && (
+                                <Typography variant="body2" sx={{ color: '#4caf50', fontWeight: 'bold' }}>
+                                  {item.price}
+                                </Typography>
+                              )}
+                              {item.metadata && Object.keys(item.metadata).length > 0 && (
+                                <Box sx={{ mt: 1 }}>
+                                  <Typography variant="caption" sx={{ color: darkMode ? '#888' : '#666' }}>
+                                    Metadata: {JSON.stringify(item.metadata)}
+                                  </Typography>
+                                </Box>
+                              )}
+                            </Box>
+                          ))}
+                        </Box>
+                      </Paper>
+                      <CopyButton content={JSON.stringify(cleanedItems, null, 2)} darkMode={darkMode} />
+                    </Box>
+                    <Box sx={{ mt: 1 }}>
+                      <Button
+                        onClick={() => {
+                          const blob = new Blob([JSON.stringify(cleanedItems, null, 2)], { type: 'application/json' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `${row.name || 'cleaned-items'}.json`;
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                          URL.revokeObjectURL(url);
+                        }}
+                        sx={{ color: '#FF00C3', textTransform: 'none', p: 0, minWidth: 'auto', backgroundColor: 'transparent', '&:hover': { textDecoration: 'underline', backgroundColor: 'transparent' } }}
+                      >
+                        Download Cleaned Items (JSON)
                       </Button>
                     </Box>
                   </AccordionDetails>
